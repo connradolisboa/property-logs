@@ -2,7 +2,7 @@ import { isSupportedTimelineColor } from "./colorPalette";
 
 export type TimelineLevel = 0 | 1 | 2 | 3 | 4;
 
-export type TimelineColorMode = "level" | "property";
+export type TimelineColorMode = "level" | "property" | "value";
 
 export type HistoryParserIssueCode =
   | "history-not-array"
@@ -39,12 +39,16 @@ export interface HistoryParserOptions {
   creationDate: Date | number | string;
   today: Date | number | string;
   levelMapping: Record<string, number>;
+  /** Vault-wide level defaults, used when the dashboard has no mapping for a value. */
+  globalLevelMapping?: Record<string, number>;
   defaultLevelForUnset: TimelineLevel;
   unmappedValueLevel: TimelineLevel;
   colorMode: TimelineColorMode;
   levelColors: Partial<Record<TimelineLevel, string>>;
   colorPropertyValue?: unknown;
   colorPropertyMap: Record<string, string>;
+  /** Tracked-property value colors, already layered over the vault-wide ones. */
+  valueColors?: Record<string, string>;
 }
 
 export interface HistoryParserResult {
@@ -115,9 +119,15 @@ function resolveLevel(
   issues: HistoryParserIssue[],
   entryIndex?: number
 ): TimelineLevel {
-  if (!hasOwn(options.levelMapping, value)) return options.unmappedValueLevel;
+  const globalMapping = options.globalLevelMapping ?? {};
+  const mapped = hasOwn(options.levelMapping, value)
+    ? options.levelMapping
+    : hasOwn(globalMapping, value)
+      ? globalMapping
+      : null;
+  if (!mapped) return options.unmappedValueLevel;
 
-  const configuredLevel = options.levelMapping[value];
+  const configuredLevel = mapped[value];
   if (
     Number.isInteger(configuredLevel) &&
     configuredLevel >= 0 &&
@@ -151,10 +161,26 @@ function resolvePropertyColorKey(
 
 function resolveColor(
   level: TimelineLevel,
+  value: string | null,
   options: HistoryParserOptions,
   issues: HistoryParserIssue[],
   entryIndex?: number
 ): string | undefined {
+  if (options.colorMode === "value") {
+    const valueColor = value === null
+      ? undefined
+      : options.valueColors?.[value]?.trim();
+    if (valueColor && isSupportedTimelineColor(valueColor)) return valueColor;
+    issues.push({
+      code: "unmapped-color",
+      entryIndex,
+      message: value === null
+        ? "This note has no tracked value to color by."
+        : `Value "${value}" does not have a configured color.`,
+    });
+    return undefined;
+  }
+
   if (options.colorMode === "level") {
     const color = options.levelColors[level]?.trim();
     if (color && isSupportedTimelineColor(color)) return color;
@@ -305,7 +331,7 @@ export function reconstructHistorySegments(
         end: today,
         value: null,
         level,
-        color: resolveColor(level, options, issues),
+        color: resolveColor(level, null, options, issues),
         implicit: true,
       });
     }
@@ -323,7 +349,7 @@ export function reconstructHistorySegments(
         end: coalescedChanges[index + 1]?.date ?? today,
         value: change.value,
         level,
-        color: resolveColor(level, options, issues, change.sourceIndex),
+        color: resolveColor(level, change.value, options, issues, change.sourceIndex),
         implicit: false,
         sourceIndex: change.sourceIndex,
       });

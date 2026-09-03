@@ -9,9 +9,13 @@ export interface DashboardOpener {
 }
 
 export class DashboardPickerModal extends FuzzySuggestModal<DashboardSettings> {
-  constructor(app: App, private readonly host: DashboardOpener) {
+  constructor(
+    app: App,
+    private readonly host: DashboardOpener,
+    placeholder = "Open Property Logs dashboard"
+  ) {
     super(app);
-    this.setPlaceholder("Open Property Logs dashboard");
+    this.setPlaceholder(placeholder);
   }
 
   getItems(): DashboardSettings[] {

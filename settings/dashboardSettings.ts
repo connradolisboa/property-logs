@@ -5,6 +5,7 @@ import {
   DashboardPropertyRule,
   DashboardSettings,
 } from "../data/dashboard";
+import { GlobalValueStyles, knownValues } from "../data/valueStyles";
 import type { TimelineLevel } from "../data/historyParser";
 import {
   COLOR_PALETTE,
@@ -18,9 +19,11 @@ export interface DashboardSettingsHost {
   app: App;
   getDashboards(): DashboardSettings[];
   setDashboards(dashboards: DashboardSettings[]): Promise<void>;
+  duplicateDashboard(id: string): Promise<DashboardSettings | null>;
   openDashboard(id: string): Promise<void>;
   refreshDashboardViews(): void;
   loadAllStatuses(): Promise<void>;
+  getGlobalValueStyles(): GlobalValueStyles;
 }
 
 function createId(): string {
@@ -31,7 +34,7 @@ function addLevelOptions(dropdown: { addOption(value: string, display: string): 
   for (let level = 0; level <= 4; level++) dropdown.addOption(String(level), `Level ${level}`);
 }
 
-function addPalettePicker(
+export function addPalettePicker(
   setting: Setting,
   currentValue: string,
   onChange: (value: string) => Promise<void> | void
@@ -240,6 +243,60 @@ function renderColorMap(
   addSetting.addButton((button) => button.setButtonText("Add").onClick(add));
 }
 
+/** Per-dashboard overrides of the vault-wide value colors. */
+function renderValueColorMap(
+  container: HTMLElement,
+  dashboard: DashboardSettings,
+  host: DashboardSettingsHost,
+  save: () => Promise<void>
+): void {
+  const globalStyles = host.getGlobalValueStyles();
+  container.createEl("p", {
+    text: "Bars take the color of the tracked value. Values fall back to the vault-wide colors in the Values tab; anything set here overrides them for this dashboard only.",
+    cls: "setting-item-description",
+  });
+
+  const list = container.createDiv({ cls: "property-logs-map-list" });
+  const draw = () => {
+    list.empty();
+    const values = knownValues(globalStyles, dashboard.levelMapping, dashboard.valueColors);
+    if (values.length === 0) {
+      list.createEl("p", {
+        text: "Add a value mapping above, or a global value in the Values tab, to color it here.",
+        cls: "setting-item-description",
+      });
+      return;
+    }
+    values.forEach((value) => {
+      const row = list.createDiv({ cls: "property-logs-map-row" });
+      const override = dashboard.valueColors[value];
+      const setting = new Setting(row)
+        .setName(value)
+        .setDesc(override
+          ? "Overrides the vault-wide color."
+          : globalStyles[value]?.color
+            ? "Using the vault-wide color."
+            : "No color yet.");
+      addPalettePicker(setting, override ?? globalStyles[value]?.color ?? "", async (color) => {
+        dashboard.valueColors[value] = color;
+        await save();
+        draw();
+      });
+      if (override) {
+        setting.addExtraButton((button) => button
+          .setIcon("rotate-ccw")
+          .setTooltip("Use the vault-wide color")
+          .onClick(async () => {
+            delete dashboard.valueColors[value];
+            await save();
+            draw();
+          }));
+      }
+    });
+  };
+  draw();
+}
+
 function renderDashboardEditor(
   container: HTMLElement,
   dashboard: DashboardSettings,
@@ -265,6 +322,13 @@ function renderDashboardEditor(
       .setButtonText("Open")
       .setCta()
       .onClick(() => host.openDashboard(dashboard.id)))
+    .addExtraButton((button) => button
+      .setIcon("copy")
+      .setTooltip("Duplicate dashboard")
+      .onClick(async () => {
+        await host.duplicateDashboard(dashboard.id);
+        redrawAll();
+      }))
     .addExtraButton((button) => button
       .setIcon("trash")
       .setTooltip("Delete dashboard")
@@ -366,7 +430,9 @@ function renderDashboardEditor(
   const colorSection = container.createDiv();
   const drawColors = () => {
     colorSection.empty();
-    if (dashboard.colorMode === "level") {
+    if (dashboard.colorMode === "value") {
+      renderValueColorMap(colorSection, dashboard, host, save);
+    } else if (dashboard.colorMode === "level") {
       colorSection.createEl("p", {
         text: "Choose a palette color once; it automatically adapts to light and dark themes. Level 0 remains hidden.",
         cls: "setting-item-description",
@@ -398,9 +464,10 @@ function renderDashboardEditor(
     .addDropdown((dropdown) => dropdown
       .addOption("level", "Level")
       .addOption("property", "Property")
+      .addOption("value", "Tracked value")
       .setValue(dashboard.colorMode)
       .onChange(async (value) => {
-        dashboard.colorMode = value === "property" ? "property" : "level";
+        dashboard.colorMode = value === "property" || value === "value" ? value : "level";
         await save();
         drawColors();
       }));
@@ -434,6 +501,26 @@ function renderDashboardEditor(
       .setValue(dashboard.noteOpenGesture)
       .onChange(async (value) => {
         dashboard.noteOpenGesture = value === "click" ? "click" : "ctrl-click";
+        await save();
+      }));
+
+  new Setting(container)
+    .setName("Calendar axis")
+    .setDesc("Draws clickable day, week, month, quarter, and year cells with matching dividers.")
+    .addToggle((toggle) => toggle
+      .setValue(dashboard.showPeriodAxis)
+      .onChange(async (value) => {
+        dashboard.showPeriodAxis = value;
+        await save();
+      }));
+
+  new Setting(container)
+    .setName("Notes from periodic notes")
+    .setDesc("Shows marked task lines such as `- [n] …` from periodic notes on this timeline.")
+    .addToggle((toggle) => toggle
+      .setValue(dashboard.showJournalNotes)
+      .onChange(async (value) => {
+        dashboard.showJournalNotes = value;
         await save();
       }));
 

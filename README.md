@@ -11,6 +11,11 @@ An [Obsidian](https://obsidian.md) plugin that automatically logs property chang
 - **Daily note logging** — Mirror property changes into your daily note using tag-based templates, so you can see at a glance what moved each day
 - **Visual status charts** — Insert interactive charts that visualize how status evolved over time across multiple notes (requires [Dataview](https://github.com/blacksmithgu/obsidian-dataview) and [Obsidian Charts](https://github.com/phibr0/obsidian-charts))
 - **Timeline dashboards** — Create saved, interactive date-axis dashboards with independent scope, grouping, sorting, colors, and click-to-update bars
+- **Embedded dashboards** — Drop a dashboard into any note with a `property-logs` code block; inside a periodic note it centers on that note's date and zooms to match the note type
+- **Periodic-note integration** — Clickable day, week, month, quarter, and year cells open the matching note through [Journals](https://github.com/srg-kostyrko/obsidian-journals), with week numbers and dividers on the axis
+- **Notes from your journal** — Marked task lines such as `- [n] Felt good about this` appear on the timeline for that note's date, with a per-marker icon and color
+- **Foldable rows** — Collapse a status or group row into a single minimal lane of note titles
+- **Global value styles** — Set a level and color once per property value; any dashboard can override them
 - **Customizable keys** — Rename the history key and property names to match your vault's naming conventions
 - **Multiple tracked properties** — Go beyond status—track deadline changes, priority updates, assignees, or any other property
 
@@ -99,7 +104,7 @@ Alternatively, install via [BRAT](https://github.com/TfTHacker/obsidian42-brat) 
 
 ### Settings Overview
 
-Open **Settings → Property Logs** to configure three main sections: Filters, Behavior, and Chart Defaults.
+Open **Settings → Property Logs** to configure six tabs: Filters, Behavior, Daily Note Log, Dashboards, Values, and Periodic Notes.
 
 #### Filters Tab
 
@@ -223,7 +228,7 @@ Clicking a timeline bar opens a value picker. Choosing a mapped value or enterin
 
 ## Commands
 
-The plugin adds three commands (accessible via Ctrl/Cmd+P command palette):
+The plugin adds five commands (accessible via Ctrl/Cmd+P command palette):
 
 ### Open Timeline Dashboard
 
@@ -238,6 +243,14 @@ From the dashboard you can:
 - Add an eligible existing note or create a new note and set its initial value
 
 The timeline uses the bundled `vis-timeline` renderer; no companion plugin is required.
+
+### Insert Dashboard Embed
+
+Inserts a `property-logs` code block at the cursor. See [Embedding a dashboard](#embedding-a-dashboard).
+
+### Duplicate Dashboard
+
+Copies a dashboard — scope, mappings, colors, and layout — under a new name and opens the copy. The same action is available from the Dashboards settings tab and from the dashboard's overflow menu.
 
 ### Insert Status Chart
 
@@ -259,6 +272,67 @@ The chart is inserted as a dataviewjs code block at your cursor position.
 Opens a modal to add a timestamped comment to the current note's history.
 
 Comments are logged to the same history entry as status changes on the same day (or create a new entry if no status change occurred). Useful for annotating why a status changed or adding context to a property change.
+
+## Embedding a dashboard
+
+Add a code block to any note:
+
+````markdown
+```property-logs
+dashboard: Topics
+date: auto
+zoom: auto
+```
+````
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `dashboard` | first dashboard | Dashboard name or id |
+| `date` | `auto` | `auto` uses the host note's own period; `today` or a `YYYY-MM-DD` date pins the embed |
+| `period` | `auto` | Forces `day`, `week`, `month`, `quarter`, or `year` instead of the note's own type |
+| `zoom` | `auto` | Visible span such as `30d`, `6w`, `3m`, or `1y`. `auto` uses the span configured for the note type |
+| `height` | `420` | Maximum height in pixels |
+| `header` | `true` | Shows the slim header with the dashboard name, period, and zoom controls |
+
+In a periodic note the embed centers on that note's date and zooms to match its type: a daily note shows a few weeks, a monthly note shows a couple of quarters. Spans per note type are configured in the Periodic Notes tab, and `zoom:` overrides them for a single block.
+
+Because the embed reads the period from the note the block is rendered for, it also works with [Virtual Content](https://github.com/Signynt/virtual-footer): put the code block in a Virtual Content rule for your daily notes and every daily note gets a dashboard centered on its own date without touching the files.
+
+## Periodic Notes and Journals
+
+With the [Journals](https://github.com/srg-kostyrko/obsidian-journals) plugin installed, the calendar axis above the timeline is clickable:
+
+- Day cells open the daily note
+- Week cells (labelled with the ISO week number) open the weekly note
+- Month, quarter, and year cells open their notes
+
+Journals creates the note if it does not exist yet. Without Journals, day cells fall back to the core Daily Notes plugin and the other levels report that no journal is configured. Week dividers follow the week start configured in the Periodic Notes tab.
+
+### Notes from periodic notes
+
+A task line in a periodic note becomes a note on the timeline at that note's date:
+
+```markdown
+- [n] Today I've been feeling well about this
+- [!] Deployment slipped again
+- [?] Is the new scope realistic
+```
+
+Each marker gets its own icon and color, configured in the Periodic Notes tab, which start out as `n` (note), `!` (important), `?` (question), `i` (info), `*` (highlight), and `b` (bookmark). Markers use Obsidian's checkbox syntax, so the same characters your theme styles as custom checkboxes work here, and the rendered note carries a `data-task` attribute for further styling. Plain `- [ ]` and `- [x]` lines are ignored.
+
+Notes are truncated on the timeline and show the full text on hover; clicking one opens the source note on that line. If the line links to a note that has its own row — `- [n] [[Project Atlas]] shipped the beta` — the note attaches to that row instead of the shared journal lane.
+
+## Folding rows
+
+Every group header carries a fold toggle. Folding collapses the rows underneath into a single minimal lane that shows just the note titles, which keeps a long dashboard readable while still showing when each note changed. Fold state is saved per dashboard, and the overflow menu can fold or unfold everything at once.
+
+## Global value styles
+
+The **Values** tab sets a level and color per property value for the whole vault, so `Active` means the same thing on every dashboard. A dashboard's own value mapping or color always overrides the global one, and the "Tracked value" color mode colors bars by the value itself rather than by level.
+
+## Mobile
+
+Dashboards and embeds adapt to narrow screens: the toolbar wraps and scrolls, rows and labels shrink, and controls use touch-sized targets. On mobile, tapping a journal note opens a menu with the full text and a link to the source note, since there is no hover. Full-tab dashboards support pinch-to-zoom; embedded dashboards stay still so the note keeps scrolling normally, and their header buttons handle zooming.
 
 ## Supported Status Values
 

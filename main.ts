@@ -2,12 +2,33 @@ import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TextAreaComponen
 
 import {
   DashboardSettings,
+  duplicateDashboardSettings,
   isFileInDashboardScope,
   normalizeDashboardSettings,
 } from "./data/dashboard";
 import { collectCompatibleHistory, historyContainsKey } from "./data/historyCompatibility";
+import {
+  DEFAULT_JOURNAL_MARKERS,
+  JournalMarkerStyle,
+  normalizeJournalMarkers,
+} from "./data/journalMarkers";
+import {
+  DEFAULT_PERIOD_WINDOW_DAYS,
+  PeriodGranularity,
+  normalizePeriodWindowDays,
+} from "./data/periodic";
+import { GlobalValueStyles, normalizeGlobalValueStyles } from "./data/valueStyles";
+import { JournalNoteIndex } from "./integrations/journalNotes";
+import { PeriodicNotes, PeriodicNotesConfig } from "./integrations/periodicNotes";
 import { DashboardPickerModal } from "./modals/DashboardPickerModal";
 import { renderDashboardSettingsPane } from "./settings/dashboardSettings";
+import { renderPeriodicSettingsPane } from "./settings/periodicSettings";
+import { renderValueSettingsPane } from "./settings/valueSettings";
+import {
+  DashboardEmbed,
+  EMBED_CODE_BLOCK,
+  createEmbedProcessor,
+} from "./view/DashboardEmbed";
 import { TIMELINE_VIEW_TYPE, TimelineDashboardView } from "./view/TimelineView";
 
 type StatusEntry = Record<string, string>;
@@ -51,6 +72,14 @@ interface PluginSettings {
   };
   dailyNoteLog: DailyNoteLogSettings;
   dashboards: DashboardSettings[];
+  /** Vault-wide levels and colors per tracked-property value. Dashboards override these. */
+  globalValueStyles: GlobalValueStyles;
+  /** Checkbox markers that turn periodic-note lines into timeline notes. */
+  journalMarkers: JournalMarkerStyle[];
+  /** 0 = Sunday … 6 = Saturday. Drives the week axis and week journals. */
+  weekStartsOn: number;
+  /** Calendar span an embedded dashboard shows for each periodic-note type. */
+  periodWindowDays: Record<PeriodGranularity, number>;
 }
 
 interface PluginData {
@@ -87,11 +116,19 @@ const DEFAULT_SETTINGS: PluginSettings = {
     groups: [],
   },
   dashboards: [],
+  globalValueStyles: {},
+  journalMarkers: DEFAULT_JOURNAL_MARKERS.map((marker) => ({ ...marker })),
+  weekStartsOn: 1,
+  periodWindowDays: { ...DEFAULT_PERIOD_WINDOW_DAYS },
 };
 
 export default class PropertyLogsPlugin extends Plugin {
   private previousStatuses: Map<string, string> = new Map();
   private previousPropertyValues: Map<string, Record<string, string>> = new Map();
+  private periodicNotes!: PeriodicNotes;
+  private journalNoteIndex!: JournalNoteIndex;
+  private readonly embeds = new Set<DashboardEmbed>();
+  private dashboardRefreshTimer: number | null = null;
   settings: PluginSettings = { ...DEFAULT_SETTINGS };
 
   async onload() {
@@ -99,7 +136,22 @@ export default class PropertyLogsPlugin extends Plugin {
 
     await this.load_();
 
+    this.periodicNotes = new PeriodicNotes(this.app, () => this.periodicNotesConfig());
+    this.journalNoteIndex = new JournalNoteIndex(
+      this.app,
+      this.periodicNotes,
+      () => this.settings.journalMarkers
+    );
+
     this.registerView(TIMELINE_VIEW_TYPE, (leaf) => new TimelineDashboardView(leaf, this));
+
+    this.registerMarkdownCodeBlockProcessor(
+      EMBED_CODE_BLOCK,
+      createEmbedProcessor(this.app, this, (embed) => {
+        this.embeds.add(embed);
+        embed.register(() => this.embeds.delete(embed));
+      })
+    );
 
     this.addSettingTab(new StatusHistorySettingTab(this.app, this));
 
@@ -111,6 +163,48 @@ export default class PropertyLogsPlugin extends Plugin {
       id: "open-property-logs-dashboard",
       name: "Open timeline dashboard",
       callback: () => this.openDashboardPicker(),
+    });
+
+    this.addCommand({
+      id: "insert-dashboard-embed",
+      name: "Insert dashboard embed",
+      editorCallback: (editor) => {
+        const dashboard = this.settings.dashboards[0];
+        if (!dashboard) {
+          new Notice("Create a dashboard in Property Logs settings first.");
+          return;
+        }
+        editor.replaceRange(
+          [
+            "```" + EMBED_CODE_BLOCK,
+            `dashboard: ${dashboard.name}`,
+            "date: auto",
+            "zoom: auto",
+            "```",
+            "",
+          ].join("\n"),
+          editor.getCursor()
+        );
+      },
+    });
+
+    this.addCommand({
+      id: "duplicate-dashboard",
+      name: "Duplicate dashboard",
+      callback: () => {
+        if (this.settings.dashboards.length === 0) {
+          new Notice("Create a dashboard in Property Logs settings first.");
+          return;
+        }
+        new DashboardPickerModal(this.app, {
+          app: this.app,
+          getDashboards: () => this.getDashboards(),
+          openDashboard: async (id) => {
+            const copy = await this.duplicateDashboard(id);
+            if (copy) await this.openDashboard(copy.id);
+          },
+        }, "Duplicate Property Logs dashboard").open();
+      },
     });
 
     this.addCommand({
@@ -139,13 +233,25 @@ export default class PropertyLogsPlugin extends Plugin {
     this.registerEvent(
       this.app.metadataCache.on("changed", (file: TFile) => {
         void this.handleMetadataChange(file);
+        this.journalNoteIndex.invalidate(file.path);
         this.refreshDashboardViews();
       })
     );
 
     this.registerEvent(this.app.vault.on("create", () => this.refreshDashboardViews()));
-    this.registerEvent(this.app.vault.on("delete", () => this.refreshDashboardViews()));
-    this.registerEvent(this.app.vault.on("rename", () => this.refreshDashboardViews()));
+    this.registerEvent(this.app.vault.on("delete", (file) => {
+      this.journalNoteIndex.invalidate(file.path);
+      this.refreshDashboardViews();
+    }));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      this.journalNoteIndex.invalidate(oldPath);
+      this.journalNoteIndex.invalidate(file.path);
+      this.refreshDashboardViews();
+    }));
+    this.registerEvent(this.app.vault.on("modify", (file) => {
+      this.journalNoteIndex.invalidate(file.path);
+      this.refreshDashboardViews();
+    }));
   }
 
   getDashboards(): DashboardSettings[] {
@@ -263,9 +369,100 @@ export default class PropertyLogsPlugin extends Plugin {
   }
 
   refreshDashboardViews(): void {
+    // A frontmatter edit normally produces several vault/cache events. Let that
+    // short burst settle before asking every open dashboard to rebuild.
+    if (this.dashboardRefreshTimer !== null) window.clearTimeout(this.dashboardRefreshTimer);
+    this.dashboardRefreshTimer = window.setTimeout(() => {
+      this.dashboardRefreshTimer = null;
+      this.refreshDashboardViewsNow();
+    }, 80);
+  }
+
+  private refreshDashboardViewsNow(): void {
     this.app.workspace.getLeavesOfType(TIMELINE_VIEW_TYPE).forEach((leaf) => {
       if (leaf.view instanceof TimelineDashboardView) leaf.view.refresh();
     });
+    this.embeds.forEach((embed) => embed.refresh());
+  }
+
+  // ─── Dashboard host ─────────────────────────────────────────────────────────
+
+  async duplicateDashboard(id: string): Promise<DashboardSettings | null> {
+    const dashboards = this.getDashboards();
+    const index = dashboards.findIndex((dashboard) => dashboard.id === id);
+    if (index === -1) {
+      new Notice("Property Logs dashboard not found.");
+      return null;
+    }
+    const source = dashboards[index];
+    const names = new Set(dashboards.map((dashboard) => dashboard.name));
+    let name = `${source.name} copy`;
+    for (let suffix = 2; names.has(name); suffix++) name = `${source.name} copy ${suffix}`;
+    const copy = duplicateDashboardSettings(
+      source,
+      `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`,
+      name
+    );
+    const next = [...dashboards];
+    next.splice(index + 1, 0, copy);
+    await this.setDashboards(next);
+    return copy;
+  }
+
+  getGlobalValueStyles(): GlobalValueStyles {
+    return this.settings.globalValueStyles;
+  }
+
+  getJournalMarkers(): JournalMarkerStyle[] {
+    return this.settings.journalMarkers;
+  }
+
+  getPeriodicNotes(): PeriodicNotes {
+    return this.periodicNotes;
+  }
+
+  getJournalNoteIndex(): JournalNoteIndex {
+    return this.journalNoteIndex;
+  }
+
+  getWeekStartsOn(): number {
+    return this.settings.weekStartsOn;
+  }
+
+  getPeriodWindowDays(): Record<PeriodGranularity, number> {
+    return this.settings.periodWindowDays;
+  }
+
+  async setJournalMarkers(markers: JournalMarkerStyle[]): Promise<void> {
+    this.settings.journalMarkers = markers;
+    this.journalNoteIndex.invalidate();
+    await this.save();
+    this.refreshDashboardViews();
+  }
+
+  async setWeekStartsOn(day: number): Promise<void> {
+    this.settings.weekStartsOn = Number.isInteger(day) && day >= 0 && day <= 6 ? day : 1;
+    await this.save();
+    this.refreshDashboardViews();
+  }
+
+  async setPeriodWindowDays(days: Record<PeriodGranularity, number>): Promise<void> {
+    this.settings.periodWindowDays = normalizePeriodWindowDays(days);
+    await this.save();
+    this.refreshDashboardViews();
+  }
+
+  hasJournalsPlugin(): boolean {
+    return this.periodicNotes.hasJournals();
+  }
+
+  private periodicNotesConfig(): PeriodicNotesConfig {
+    return {
+      dailyFolder: this.settings.dailyNoteLog.folder,
+      dailyFormat: this.settings.dailyNoteLog.dateFormat || "YYYY-MM-DD",
+      dateFields: ["journal-date", "date"],
+      weekStartsOn: this.settings.weekStartsOn,
+    };
   }
 
   private openDashboardPicker(): void {
@@ -298,6 +495,14 @@ export default class PropertyLogsPlugin extends Plugin {
               normalizeDashboardSettings(dashboard, `dashboard-${index + 1}`, `Dashboard ${index + 1}`)
             )
           : [],
+        globalValueStyles: normalizeGlobalValueStyles(data.settings.globalValueStyles),
+        journalMarkers: normalizeJournalMarkers(data.settings.journalMarkers),
+        weekStartsOn: Number.isInteger(data.settings.weekStartsOn)
+          && data.settings.weekStartsOn >= 0
+          && data.settings.weekStartsOn <= 6
+          ? data.settings.weekStartsOn
+          : DEFAULT_SETTINGS.weekStartsOn,
+        periodWindowDays: normalizePeriodWindowDays(data.settings.periodWindowDays),
       };
     }
     if (data?.previousStatuses) {
@@ -705,6 +910,7 @@ export default class PropertyLogsPlugin extends Plugin {
   }
 
   onunload() {
+    if (this.dashboardRefreshTimer !== null) window.clearTimeout(this.dashboardRefreshTimer);
     console.log("Property Logs Plugin unloaded");
   }
 }
@@ -1101,6 +1307,8 @@ class StatusHistorySettingTab extends PluginSettingTab {
       { id: "behavior", label: "Behavior" },
       { id: "daily", label: "Daily Note Log" },
       { id: "dashboards", label: "Dashboards" },
+      { id: "values", label: "Values" },
+      { id: "periodic", label: "Periodic Notes" },
       { id: "chart", label: "Chart Defaults" },
     ];
 
@@ -1348,6 +1556,16 @@ class StatusHistorySettingTab extends PluginSettingTab {
     const dashboardsPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
     dashboardsPane.setAttribute("data-tab", "dashboards");
     renderDashboardSettingsPane(dashboardsPane, this.plugin);
+
+    // --- Values tab ---
+    const valuesPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
+    valuesPane.setAttribute("data-tab", "values");
+    renderValueSettingsPane(valuesPane, this.plugin);
+
+    // --- Periodic Notes tab ---
+    const periodicPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
+    periodicPane.setAttribute("data-tab", "periodic");
+    renderPeriodicSettingsPane(periodicPane, this.plugin);
 
     // --- Chart Defaults tab ---
     const chartPane = contentEl.createDiv({ cls: "status-history-tab-pane" });

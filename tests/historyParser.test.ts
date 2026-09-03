@@ -233,3 +233,34 @@ test("does not mutate metadata-cache input", () => {
 
   assert.equal(JSON.stringify(history), snapshot);
 });
+
+test("global level mappings fill the gaps a dashboard leaves", () => {
+  const result = reconstructHistorySegments(options({
+    history: [
+      { dateSet: "2026-09-01", relevantSet: "Low" },
+      { dateSet: "2026-09-02", relevantSet: "Parked" },
+    ],
+    globalLevelMapping: { Parked: 1, Low: 4 },
+  }));
+
+  // The dashboard's own mapping still wins for Low; Parked comes from the vault.
+  assert.equal(result.segments[0].level, 1);
+  assert.equal(result.segments[1].level, 1);
+  assert.equal(result.currentValue, "Parked");
+});
+
+test("value colors drive the bars in the tracked-value color mode", () => {
+  const result = reconstructHistorySegments(options({
+    history: [
+      { dateSet: "2026-09-01", relevantSet: "Low" },
+      { dateSet: "2026-09-02", relevantSet: "High" },
+    ],
+    colorMode: "value",
+    valueColors: { Low: "palette:red" },
+  }));
+
+  assert.equal(result.segments[0].color, "palette:red");
+  assert.equal(result.segments[1].color, undefined);
+  assert.ok(result.issues.some((issue) => issue.code === "unmapped-color"));
+  assert.equal(result.malformed, false);
+});

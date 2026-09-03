@@ -23,7 +23,7 @@ __export(main_exports, {
   default: () => PropertyLogsPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian6 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 
 // data/colorPalette.ts
 var COLOR_PALETTE = [
@@ -135,6 +135,7 @@ function createDashboardSettings(id, name = "Dashboard") {
     levelColors: { ...DEFAULT_LEVEL_COLORS },
     colorProperty: "tags",
     colorPropertyMap: {},
+    valueColors: {},
     scopeFilter: {
       includedFolders: [...EMPTY_SCOPE.includedFolders],
       includedTags: [...EMPTY_SCOPE.includedTags],
@@ -147,8 +148,18 @@ function createDashboardSettings(id, name = "Dashboard") {
     groupBy: "status",
     sortBy: "alphabetical",
     sortAscending: true,
-    noteOpenGesture: "ctrl-click"
+    noteOpenGesture: "ctrl-click",
+    foldedGroups: [],
+    showPeriodAxis: true,
+    showJournalNotes: true
   };
+}
+function duplicateDashboardSettings(dashboard, id, name) {
+  return normalizeDashboardSettings(
+    JSON.parse(JSON.stringify({ ...dashboard, id, name })),
+    id,
+    name
+  );
 }
 function normalizeDashboardSettings(raw, fallbackId, fallbackName) {
   const defaults2 = createDashboardSettings(fallbackId, fallbackName);
@@ -165,7 +176,7 @@ function normalizeDashboardSettings(raw, fallbackId, fallbackName) {
     levelMapping: levelMap(value.levelMapping),
     defaultLevelForUnset: level(value.defaultLevelForUnset, defaults2.defaultLevelForUnset),
     unmappedValueLevel: level(value.unmappedValueLevel, defaults2.unmappedValueLevel),
-    colorMode: value.colorMode === "property" ? "property" : "level",
+    colorMode: value.colorMode === "property" || value.colorMode === "value" ? value.colorMode : "level",
     levelColors: {
       0: normalizeTimelineColor(rawLevelColors["0"], DEFAULT_LEVEL_COLORS[0]),
       1: normalizeTimelineColor(rawLevelColors["1"], DEFAULT_LEVEL_COLORS[1]),
@@ -176,6 +187,12 @@ function normalizeDashboardSettings(raw, fallbackId, fallbackName) {
     colorProperty: typeof value.colorProperty === "string" ? value.colorProperty : defaults2.colorProperty,
     colorPropertyMap: Object.fromEntries(
       Object.entries(stringMap(value.colorPropertyMap)).map(([key, color]) => [
+        key,
+        normalizeTimelineColor(color, DEFAULT_PROPERTY_COLOR)
+      ])
+    ),
+    valueColors: Object.fromEntries(
+      Object.entries(stringMap(value.valueColors)).map(([key, color]) => [
         key,
         normalizeTimelineColor(color, DEFAULT_PROPERTY_COLOR)
       ])
@@ -192,7 +209,10 @@ function normalizeDashboardSettings(raw, fallbackId, fallbackName) {
     groupBy,
     sortBy,
     sortAscending: typeof value.sortAscending === "boolean" ? value.sortAscending : true,
-    noteOpenGesture: value.noteOpenGesture === "click" ? "click" : "ctrl-click"
+    noteOpenGesture: value.noteOpenGesture === "click" ? "click" : "ctrl-click",
+    foldedGroups: strings(value.foldedGroups),
+    showPeriodAxis: typeof value.showPeriodAxis === "boolean" ? value.showPeriodAxis : true,
+    showJournalNotes: typeof value.showJournalNotes === "boolean" ? value.showJournalNotes : true
   };
 }
 function folderMatches(path2, folders) {
@@ -283,13 +303,604 @@ function historyContainsKey(history, key) {
   );
 }
 
-// modals/DashboardPickerModal.ts
+// data/journalMarkers.ts
+var DEFAULT_JOURNAL_MARKERS = [
+  { marker: "n", label: "Note", icon: "pencil", color: "palette:blue" },
+  { marker: "!", label: "Important", icon: "alert-triangle", color: "palette:red" },
+  { marker: "?", label: "Question", icon: "help-circle", color: "palette:purple" },
+  { marker: "i", label: "Info", icon: "info", color: "palette:teal" },
+  { marker: "*", label: "Highlight", icon: "star", color: "palette:amber" },
+  { marker: "b", label: "Bookmark", icon: "bookmark", color: "palette:pink" }
+];
+var FALLBACK_JOURNAL_MARKER = {
+  marker: "",
+  label: "Note",
+  icon: "message-square",
+  color: "palette:slate"
+};
+function normalizeJournalMarkers(raw) {
+  if (!Array.isArray(raw)) return DEFAULT_JOURNAL_MARKERS.map((style) => ({ ...style }));
+  const markers = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item;
+    const marker = typeof record.marker === "string" ? record.marker.trim().slice(0, 1) : "";
+    if (!marker || markers.some((style) => style.marker === marker)) continue;
+    markers.push({
+      marker,
+      label: typeof record.label === "string" && record.label.trim() ? record.label.trim() : marker,
+      icon: typeof record.icon === "string" && record.icon.trim() ? record.icon.trim() : FALLBACK_JOURNAL_MARKER.icon,
+      color: normalizeTimelineColor(record.color, DEFAULT_PROPERTY_COLOR)
+    });
+  }
+  return markers;
+}
+function markerStyle(markers, marker) {
+  return markers.find((style) => style.marker === marker) ?? { ...FALLBACK_JOURNAL_MARKER, marker, label: marker || FALLBACK_JOURNAL_MARKER.label };
+}
+var TASK_LINE = /^\s*(?:[-*+]|\d+[.)])\s+\[(.)\]\s*(.*)$/;
+var WIKI_LINK = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g;
+var FRONTMATTER_FENCE = /^---\s*$/;
+function extractLinks(text) {
+  const links = [];
+  for (const match of text.matchAll(WIKI_LINK)) {
+    const target = match[1].trim();
+    if (target && !links.includes(target)) links.push(target);
+  }
+  return links;
+}
+function plainNoteText(text) {
+  return text.replace(WIKI_LINK, (_match, target) => target.trim()).replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*_`~]/g, "").replace(/\s+/g, " ").trim();
+}
+function parseJournalNotes(content, markers) {
+  const wanted = new Set(markers);
+  if (wanted.size === 0) return [];
+  const notes = [];
+  const lines = content.split(/\r?\n/);
+  let fence = null;
+  let inFrontmatter = false;
+  lines.forEach((line, index) => {
+    if (index === 0 && FRONTMATTER_FENCE.test(line)) {
+      inFrontmatter = true;
+      return;
+    }
+    if (inFrontmatter) {
+      if (FRONTMATTER_FENCE.test(line)) inFrontmatter = false;
+      return;
+    }
+    const fenceMatch = /^\s*(```+|~~~+)/.exec(line);
+    if (fenceMatch) {
+      if (fence === null) fence = fenceMatch[1][0];
+      else if (fenceMatch[1][0] === fence) fence = null;
+      return;
+    }
+    if (fence !== null) return;
+    const match = TASK_LINE.exec(line);
+    if (!match) return;
+    const marker = match[1];
+    if (!wanted.has(marker)) return;
+    const text = match[2].trim();
+    if (!text) return;
+    notes.push({ marker, text, line: index, links: extractLinks(text) });
+  });
+  return notes;
+}
+
+// data/periodic.ts
+var PERIOD_GRANULARITIES = [
+  "day",
+  "week",
+  "month",
+  "quarter",
+  "year"
+];
+var DAY_MS = 1e3 * 60 * 60 * 24;
+function isPeriodGranularity(value) {
+  return typeof value === "string" && PERIOD_GRANULARITIES.includes(value);
+}
+function startOfDay(date2) {
+  return new Date(date2.getFullYear(), date2.getMonth(), date2.getDate());
+}
+function addDays(date2, days) {
+  const next = new Date(date2);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+function startOfWeek(date2, weekStartsOn = 1) {
+  const day = startOfDay(date2);
+  const offset = (day.getDay() - weekStartsOn + 7) % 7;
+  return addDays(day, -offset);
+}
+function isoWeekNumber(date2) {
+  const day = new Date(Date.UTC(date2.getFullYear(), date2.getMonth(), date2.getDate()));
+  const weekday = day.getUTCDay() || 7;
+  day.setUTCDate(day.getUTCDate() + 4 - weekday);
+  const yearStart = Date.UTC(day.getUTCFullYear(), 0, 1);
+  return Math.ceil(((day.getTime() - yearStart) / DAY_MS + 1) / 7);
+}
+function periodRange(granularity, date2, weekStartsOn = 1) {
+  const day = startOfDay(date2);
+  switch (granularity) {
+    case "day":
+      return { start: day, end: addDays(day, 1) };
+    case "week": {
+      const start = startOfWeek(day, weekStartsOn);
+      return { start, end: addDays(start, 7) };
+    }
+    case "month": {
+      const start = new Date(day.getFullYear(), day.getMonth(), 1);
+      return { start, end: new Date(day.getFullYear(), day.getMonth() + 1, 1) };
+    }
+    case "quarter": {
+      const firstMonth = Math.floor(day.getMonth() / 3) * 3;
+      const start = new Date(day.getFullYear(), firstMonth, 1);
+      return { start, end: new Date(day.getFullYear(), firstMonth + 3, 1) };
+    }
+    case "year": {
+      const start = new Date(day.getFullYear(), 0, 1);
+      return { start, end: new Date(day.getFullYear() + 1, 0, 1) };
+    }
+  }
+}
+function nextPeriodStart(granularity, start, weekStartsOn = 1) {
+  switch (granularity) {
+    case "day":
+      return addDays(start, 1);
+    case "week":
+      return addDays(startOfWeek(start, weekStartsOn), 7);
+    case "month":
+      return new Date(start.getFullYear(), start.getMonth() + 1, 1);
+    case "quarter":
+      return new Date(start.getFullYear(), Math.floor(start.getMonth() / 3) * 3 + 3, 1);
+    case "year":
+      return new Date(start.getFullYear() + 1, 0, 1);
+  }
+}
+var DEFAULT_PERIOD_WINDOW_DAYS = {
+  day: 21,
+  week: 70,
+  month: 240,
+  quarter: 550,
+  year: 1460
+};
+function normalizePeriodWindowDays(raw) {
+  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const result = { ...DEFAULT_PERIOD_WINDOW_DAYS };
+  for (const granularity of PERIOD_GRANULARITIES) {
+    const value = Number(source[granularity]);
+    if (Number.isFinite(value) && value >= 1 && value <= 365 * 40) {
+      result[granularity] = Math.round(value);
+    }
+  }
+  return result;
+}
+function windowForPeriod(range, spanDays) {
+  const periodSpan = Math.max(range.end.getTime() - range.start.getTime(), DAY_MS);
+  const span = Math.max(spanDays * DAY_MS, periodSpan);
+  const center = range.start.getTime() + periodSpan / 2;
+  return {
+    start: new Date(center - span / 2),
+    end: new Date(center + span / 2)
+  };
+}
+function axisGranularities(spanMs) {
+  const days = spanMs / DAY_MS;
+  if (days <= 45) return ["day", "week"];
+  if (days <= 220) return ["week", "month"];
+  if (days <= 800) return ["month", "quarter"];
+  return ["quarter", "year"];
+}
+function periodBoundaries(granularity, window2, weekStartsOn = 1) {
+  const boundaries = [];
+  let cursor = periodRange(granularity, window2.start, weekStartsOn).start;
+  for (let guard = 0; guard < 2e3; guard++) {
+    boundaries.push(cursor);
+    if (cursor.getTime() > window2.end.getTime()) break;
+    const next = nextPeriodStart(granularity, cursor, weekStartsOn);
+    if (next.getTime() <= cursor.getTime()) break;
+    cursor = next;
+  }
+  return boundaries;
+}
+var MONTH_NAMES = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec"
+];
+function periodLabel(granularity, start) {
+  switch (granularity) {
+    case "day":
+      return String(start.getDate());
+    case "week":
+      return `W${String(isoWeekNumber(start)).padStart(2, "0")}`;
+    case "month":
+      return MONTH_NAMES[start.getMonth()];
+    case "quarter":
+      return `Q${Math.floor(start.getMonth() / 3) + 1}`;
+    case "year":
+      return String(start.getFullYear());
+  }
+}
+function periodTitle(granularity, start) {
+  const iso = toDateString(start);
+  switch (granularity) {
+    case "day":
+      return iso;
+    case "week":
+      return `Week ${isoWeekNumber(start)}, starting ${iso}`;
+    case "month":
+      return `${MONTH_NAMES[start.getMonth()]} ${start.getFullYear()}`;
+    case "quarter":
+      return `Q${Math.floor(start.getMonth() / 3) + 1} ${start.getFullYear()}`;
+    case "year":
+      return String(start.getFullYear());
+  }
+}
+function toDateString(date2) {
+  const year = date2.getFullYear();
+  const month = String(date2.getMonth() + 1).padStart(2, "0");
+  const day = String(date2.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+function parseDateString(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date2 = new Date(year, month - 1, day);
+  if (date2.getFullYear() !== year || date2.getMonth() !== month - 1 || date2.getDate() !== day) {
+    return null;
+  }
+  return date2;
+}
+
+// data/valueStyles.ts
+function toLevel(value) {
+  return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 4 ? Number(value) : null;
+}
+function normalizeGlobalValueStyles(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const result = {};
+  for (const [value, style] of Object.entries(raw)) {
+    if (!value.trim()) continue;
+    if (!style || typeof style !== "object" || Array.isArray(style)) continue;
+    const record = style;
+    const color = typeof record.color === "string" && record.color.trim() ? normalizeTimelineColor(record.color, DEFAULT_PROPERTY_COLOR) : null;
+    result[value] = { level: toLevel(record.level), color };
+  }
+  return result;
+}
+function globalLevelMapping(styles) {
+  const mapping = {};
+  for (const [value, style] of Object.entries(styles)) {
+    if (style.level !== null) mapping[value] = style.level;
+  }
+  return mapping;
+}
+function resolveValueColors(styles, overrides) {
+  const colors = {};
+  for (const [value, style] of Object.entries(styles)) {
+    if (style.color) colors[value] = style.color;
+  }
+  for (const [value, color] of Object.entries(overrides)) {
+    if (color) colors[value] = color;
+  }
+  return colors;
+}
+function knownValues(styles, ...mappings) {
+  const values2 = new Set(Object.keys(styles));
+  mappings.forEach((mapping) => Object.keys(mapping).forEach((value) => values2.add(value)));
+  return Array.from(values2).sort(
+    (first, second) => first.localeCompare(second, void 0, { numeric: true, sensitivity: "base" })
+  );
+}
+
+// integrations/journalNotes.ts
+var JournalNoteIndex = class {
+  constructor(app, periodic, getMarkers) {
+    this.app = app;
+    this.periodic = periodic;
+    this.getMarkers = getMarkers;
+    this.cache = /* @__PURE__ */ new Map();
+  }
+  invalidate(path2) {
+    if (path2) this.cache.delete(path2);
+    else this.cache.clear();
+  }
+  async collect(window2) {
+    const markers = this.getMarkers();
+    if (markers.length === 0) return [];
+    const wanted = new Set(markers.map((style) => style.marker));
+    const candidates = [];
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const listItems = this.app.metadataCache.getFileCache(file)?.listItems;
+      if (!listItems?.some((item) => item.task !== void 0 && wanted.has(item.task))) continue;
+      const context = this.periodic.contextForFileSync(file);
+      if (!context) continue;
+      if (context.range.end.getTime() < window2.start.getTime()) continue;
+      if (context.range.start.getTime() > window2.end.getTime()) continue;
+      candidates.push({ file, context });
+    }
+    const parsedCandidates = await Promise.all(candidates.map(async ({ file, context }) => ({
+      file,
+      context,
+      parsed: await this.parseFile(file, wanted)
+    })));
+    return parsedCandidates.flatMap(({ file, context, parsed }) => parsed.map((note) => ({
+      id: `journal:${file.path}:${note.line}`,
+      marker: note.marker,
+      text: note.text,
+      file,
+      line: note.line,
+      links: note.links,
+      granularity: context.granularity,
+      range: context.range
+    })));
+  }
+  async parseFile(file, wanted) {
+    const cached = this.cache.get(file.path);
+    if (cached && cached.mtime === file.stat.mtime) return cached.notes;
+    try {
+      const content = await this.app.vault.cachedRead(file);
+      const notes = parseJournalNotes(content, wanted);
+      this.cache.set(file.path, { mtime: file.stat.mtime, notes });
+      return notes;
+    } catch (error) {
+      console.error(`Property Logs: could not read ${file.path}`, error);
+      return [];
+    }
+  }
+};
+
+// integrations/periodicNotes.ts
 var import_obsidian = require("obsidian");
-var DashboardPickerModal = class extends import_obsidian.FuzzySuggestModal {
-  constructor(app, host) {
+
+// data/periodicContext.ts
+var DAY_MS2 = 1e3 * 60 * 60 * 24;
+var FILENAME_PATTERNS = [
+  { pattern: /(\d{4})-(\d{2})-(\d{2})/, granularity: "day" },
+  { pattern: /(\d{4})-?W(\d{1,2})/i, granularity: "week" },
+  { pattern: /(\d{4})-?Q([1-4])/i, granularity: "quarter" },
+  { pattern: /(\d{4})-(\d{2})(?!\d)/, granularity: "month" },
+  { pattern: /^(\d{4})$/, granularity: "year" }
+];
+function granularityForSpan(days) {
+  if (days <= 1.5) return "day";
+  if (days <= 10) return "week";
+  if (days <= 45) return "month";
+  if (days <= 135) return "quarter";
+  return "year";
+}
+function weekStartFromIsoWeek(year, week, weekStartsOn) {
+  const fourthJanuary = new Date(year, 0, 4);
+  const isoWeekday = (fourthJanuary.getDay() + 6) % 7;
+  const firstIsoWeekStart = new Date(year, 0, 4 - isoWeekday);
+  const target = new Date(firstIsoWeekStart);
+  target.setDate(target.getDate() + (week - 1) * 7);
+  return periodRange("week", target, weekStartsOn).start;
+}
+function contextFromFileName(basename, weekStartsOn) {
+  for (const { pattern, granularity } of FILENAME_PATTERNS) {
+    const match = pattern.exec(basename);
+    if (!match) continue;
+    if (granularity === "day") {
+      const date2 = parseDateString(`${match[1]}-${match[2]}-${match[3]}`);
+      if (!date2) continue;
+      return { granularity, date: date2, range: periodRange("day", date2, weekStartsOn), source: "filename" };
+    }
+    if (granularity === "week") {
+      const week = Number(match[2]);
+      if (!Number.isInteger(week) || week < 1 || week > 53) continue;
+      const start2 = weekStartFromIsoWeek(Number(match[1]), week, weekStartsOn);
+      return {
+        granularity,
+        date: start2,
+        range: periodRange("week", start2, weekStartsOn),
+        source: "filename"
+      };
+    }
+    if (granularity === "quarter") {
+      const start2 = new Date(Number(match[1]), (Number(match[2]) - 1) * 3, 1);
+      return { granularity, date: start2, range: periodRange("quarter", start2, weekStartsOn), source: "filename" };
+    }
+    if (granularity === "month") {
+      const month = Number(match[2]);
+      if (month < 1 || month > 12) continue;
+      const start2 = new Date(Number(match[1]), month - 1, 1);
+      return { granularity, date: start2, range: periodRange("month", start2, weekStartsOn), source: "filename" };
+    }
+    const start = new Date(Number(match[1]), 0, 1);
+    return { granularity, date: start, range: periodRange("year", start, weekStartsOn), source: "filename" };
+  }
+  return null;
+}
+function contextFromFrontmatter(frontmatter, config) {
+  if (!frontmatter) return null;
+  const readDate = (keys2) => {
+    for (const key of keys2) {
+      const raw = frontmatter[key];
+      if (typeof raw === "string") {
+        const parsed = parseDateString(raw);
+        if (parsed) return parsed;
+      } else if (raw instanceof Date && Number.isFinite(raw.getTime())) {
+        return startOfDay(raw);
+      }
+    }
+    return null;
+  };
+  const start = readDate(["journal-start-date", ...config.dateFields]);
+  if (!start) return null;
+  const end = readDate(["journal-end-date"]);
+  const journalName = typeof frontmatter.journal === "string" ? frontmatter.journal : void 0;
+  if (end) {
+    const days = (end.getTime() - start.getTime()) / DAY_MS2 + 1;
+    const granularity = granularityForSpan(days);
+    return {
+      granularity,
+      date: start,
+      range: { start, end: new Date(end.getTime() + DAY_MS2) },
+      journalName,
+      source: "frontmatter"
+    };
+  }
+  return {
+    granularity: "day",
+    date: start,
+    range: periodRange("day", start, config.weekStartsOn),
+    journalName,
+    source: "frontmatter"
+  };
+}
+
+// integrations/periodicNotes.ts
+var DAY_MS3 = 1e3 * 60 * 60 * 24;
+var PeriodicNotes = class {
+  constructor(app, getConfig) {
+    this.app = app;
+    this.getConfig = getConfig;
+  }
+  api() {
+    const plugin = this.app.plugins?.plugins?.journals;
+    const api = plugin?.api;
+    if (!api || typeof api.journalOf !== "function" || typeof api.openNote !== "function") {
+      return null;
+    }
+    return api;
+  }
+  hasJournals() {
+    return this.api() !== null;
+  }
+  /** Frontmatter and file-name resolution only, safe to call in a render loop. */
+  contextForFileSync(file) {
+    const config = this.getConfig();
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    return contextFromFrontmatter(frontmatter, config) ?? contextFromFileName(file.basename, config.weekStartsOn);
+  }
+  /** Full resolution, preferring the Journals index over heuristics. */
+  async contextForFile(file) {
+    const config = this.getConfig();
+    const api = this.api();
+    if (api) {
+      try {
+        const note = await api.journalOf(file);
+        if (note) {
+          const start = parseDateString(note.date);
+          if (start) {
+            const end = note.endDate ? parseDateString(note.endDate) : null;
+            const info = await api.journalInfo(note.journal).catch(() => null);
+            const writeType = info?.write?.type;
+            const granularity = isPeriodGranularity(writeType) ? writeType : granularityForSpan(
+              end ? (end.getTime() - start.getTime()) / DAY_MS3 + 1 : 1
+            );
+            return {
+              granularity,
+              date: start,
+              range: end ? { start, end: new Date(end.getTime() + DAY_MS3) } : periodRange(granularity, start, config.weekStartsOn),
+              journalName: note.journal,
+              source: "journals"
+            };
+          }
+        }
+      } catch (error) {
+        console.error("Property Logs: the Journals API could not resolve this note", error);
+      }
+    }
+    return this.contextForFileSync(file);
+  }
+  /** Granularities that have a journal (or a daily note) to open. */
+  async availableGranularities() {
+    const available = /* @__PURE__ */ new Set(["day"]);
+    const api = this.api();
+    if (!api) return available;
+    try {
+      const journals = await api.listJournals();
+      journals.forEach((journal) => {
+        if (isPeriodGranularity(journal.write?.type)) available.add(journal.write.type);
+      });
+    } catch (error) {
+      console.error("Property Logs: could not list journals", error);
+    }
+    return available;
+  }
+  /** Opens (creating when needed) the periodic note covering `date`. */
+  async openPeriod(granularity, date2) {
+    const anchor = toDateString(periodRange(granularity, date2, this.getConfig().weekStartsOn).start);
+    const api = this.api();
+    if (api) {
+      try {
+        const journals = await api.listJournals().catch(() => []);
+        const match = journals.find((journal) => journal.write?.type === granularity);
+        if (match) {
+          await api.openNote(match.name, anchor);
+          return;
+        }
+        if (granularity !== "day") {
+          new import_obsidian.Notice(`No ${granularity} journal is configured in Journals.`);
+          return;
+        }
+      } catch (error) {
+        console.error("Property Logs: Journals could not open the note", error);
+      }
+    }
+    if (granularity !== "day") {
+      new import_obsidian.Notice(`Install or configure a ${granularity} journal to open this period.`);
+      return;
+    }
+    await this.openDailyNoteFallback(date2);
+  }
+  dailyNoteConfig() {
+    const config = this.getConfig();
+    const fallback = {
+      folder: config.dailyFolder,
+      format: config.dailyFormat || "YYYY-MM-DD"
+    };
+    const internalPlugins = this.app.internalPlugins;
+    const daily = internalPlugins?.getPluginById?.("daily-notes") ?? internalPlugins?.plugins?.["daily-notes"];
+    if (!daily?.enabled) return fallback;
+    const options = daily.instance?.options ?? {};
+    return {
+      folder: typeof options.folder === "string" && options.folder ? options.folder : fallback.folder,
+      format: typeof options.format === "string" && options.format ? options.format : fallback.format
+    };
+  }
+  async openDailyNoteFallback(date2) {
+    const { folder, format } = this.dailyNoteConfig();
+    const filename = `${(0, import_obsidian.moment)(date2).format(format)}.md`;
+    const path2 = (0, import_obsidian.normalizePath)(folder ? `${folder}/${filename}` : filename);
+    let file = this.app.vault.getAbstractFileByPath(path2);
+    if (!(file instanceof import_obsidian.TFile)) {
+      if (folder && !this.app.vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(folder))) {
+        await this.app.vault.createFolder((0, import_obsidian.normalizePath)(folder));
+      }
+      try {
+        file = await this.app.vault.create(path2, "");
+      } catch (error) {
+        console.error("Property Logs: could not create the daily note", error);
+        new import_obsidian.Notice("Property Logs could not create that daily note.");
+        return;
+      }
+    }
+    if (file instanceof import_obsidian.TFile) await this.app.workspace.getLeaf(false).openFile(file);
+  }
+};
+
+// modals/DashboardPickerModal.ts
+var import_obsidian2 = require("obsidian");
+var DashboardPickerModal = class extends import_obsidian2.FuzzySuggestModal {
+  constructor(app, host, placeholder = "Open Property Logs dashboard") {
     super(app);
     this.host = host;
-    this.setPlaceholder("Open Property Logs dashboard");
+    this.setPlaceholder(placeholder);
   }
   getItems() {
     return this.host.getDashboards();
@@ -303,7 +914,7 @@ var DashboardPickerModal = class extends import_obsidian.FuzzySuggestModal {
 };
 
 // settings/dashboardSettings.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 function createId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -360,7 +971,7 @@ function renderStringList(container, title, description, placeholder, values2, s
   const draw = () => {
     list.empty();
     values2.forEach((value, index) => {
-      new import_obsidian2.Setting(list).setName(value).addExtraButton((button) => button.setIcon("trash").setTooltip(`Remove ${value}`).onClick(async () => {
+      new import_obsidian3.Setting(list).setName(value).addExtraButton((button) => button.setIcon("trash").setTooltip(`Remove ${value}`).onClick(async () => {
         values2.splice(index, 1);
         await save();
         draw();
@@ -378,7 +989,7 @@ function renderStringList(container, title, description, placeholder, values2, s
     await save();
     draw();
   };
-  new import_obsidian2.Setting(container).addText((text) => {
+  new import_obsidian3.Setting(container).addText((text) => {
     input = text;
     text.setPlaceholder(placeholder);
     text.inputEl.addEventListener("keydown", (event2) => {
@@ -394,7 +1005,7 @@ function renderPropertyRules(container, title, description, rules2, save) {
     list.empty();
     rules2.forEach((rule, index) => {
       const label = rule.value ? `${rule.key} = ${rule.value}` : `${rule.key} exists`;
-      new import_obsidian2.Setting(list).setName(label).addExtraButton((button) => button.setIcon("trash").setTooltip(`Remove ${label}`).onClick(async () => {
+      new import_obsidian3.Setting(list).setName(label).addExtraButton((button) => button.setIcon("trash").setTooltip(`Remove ${label}`).onClick(async () => {
         rules2.splice(index, 1);
         await save();
         draw();
@@ -415,7 +1026,7 @@ function renderPropertyRules(container, title, description, rules2, save) {
     await save();
     draw();
   };
-  new import_obsidian2.Setting(container).addText((text) => {
+  new import_obsidian3.Setting(container).addText((text) => {
     keyInput = text;
     text.setPlaceholder("Property key");
   }).addText((text) => {
@@ -432,7 +1043,7 @@ function renderColorMap(container, dashboard, save) {
     list.empty();
     Object.entries(dashboard.colorPropertyMap).forEach(([value, color]) => {
       const row = list.createDiv({ cls: "property-logs-map-row" });
-      const setting = new import_obsidian2.Setting(row).setName(value);
+      const setting = new import_obsidian3.Setting(row).setName(value);
       addPalettePicker(setting, color, async (next) => {
         dashboard.colorPropertyMap[value] = next;
         await save();
@@ -455,7 +1066,7 @@ function renderColorMap(container, dashboard, save) {
     await save();
     draw();
   };
-  const addSetting = new import_obsidian2.Setting(container).setName("Add property color").addText((text) => {
+  const addSetting = new import_obsidian3.Setting(container).setName("Add property color").addText((text) => {
     valueInput = text;
     text.setPlaceholder("Property value");
     text.inputEl.addEventListener("keydown", (event2) => {
@@ -467,23 +1078,63 @@ function renderColorMap(container, dashboard, save) {
   });
   addSetting.addButton((button) => button.setButtonText("Add").onClick(add));
 }
+function renderValueColorMap(container, dashboard, host, save) {
+  const globalStyles = host.getGlobalValueStyles();
+  container.createEl("p", {
+    text: "Bars take the color of the tracked value. Values fall back to the vault-wide colors in the Values tab; anything set here overrides them for this dashboard only.",
+    cls: "setting-item-description"
+  });
+  const list = container.createDiv({ cls: "property-logs-map-list" });
+  const draw = () => {
+    list.empty();
+    const values2 = knownValues(globalStyles, dashboard.levelMapping, dashboard.valueColors);
+    if (values2.length === 0) {
+      list.createEl("p", {
+        text: "Add a value mapping above, or a global value in the Values tab, to color it here.",
+        cls: "setting-item-description"
+      });
+      return;
+    }
+    values2.forEach((value) => {
+      const row = list.createDiv({ cls: "property-logs-map-row" });
+      const override = dashboard.valueColors[value];
+      const setting = new import_obsidian3.Setting(row).setName(value).setDesc(override ? "Overrides the vault-wide color." : globalStyles[value]?.color ? "Using the vault-wide color." : "No color yet.");
+      addPalettePicker(setting, override ?? globalStyles[value]?.color ?? "", async (color) => {
+        dashboard.valueColors[value] = color;
+        await save();
+        draw();
+      });
+      if (override) {
+        setting.addExtraButton((button) => button.setIcon("rotate-ccw").setTooltip("Use the vault-wide color").onClick(async () => {
+          delete dashboard.valueColors[value];
+          await save();
+          draw();
+        }));
+      }
+    });
+  };
+  draw();
+}
 function renderDashboardEditor(container, dashboard, host, redrawAll) {
   container.empty();
   const save = async () => {
     await host.setDashboards(host.getDashboards());
     host.refreshDashboardViews();
   };
-  const heading = new import_obsidian2.Setting(container).setName("Dashboard").setDesc("A saved timeline with its own scope, tracked property, colors, and layout.").addText((text) => text.setValue(dashboard.name).onChange(async (value) => {
+  const heading = new import_obsidian3.Setting(container).setName("Dashboard").setDesc("A saved timeline with its own scope, tracked property, colors, and layout.").addText((text) => text.setValue(dashboard.name).onChange(async (value) => {
     dashboard.name = value.trim() || "Dashboard";
     await save();
-  })).addButton((button) => button.setButtonText("Open").setCta().onClick(() => host.openDashboard(dashboard.id))).addExtraButton((button) => button.setIcon("trash").setTooltip("Delete dashboard").onClick(async () => {
+  })).addButton((button) => button.setButtonText("Open").setCta().onClick(() => host.openDashboard(dashboard.id))).addExtraButton((button) => button.setIcon("copy").setTooltip("Duplicate dashboard").onClick(async () => {
+    await host.duplicateDashboard(dashboard.id);
+    redrawAll();
+  })).addExtraButton((button) => button.setIcon("trash").setTooltip("Delete dashboard").onClick(async () => {
     const remaining = host.getDashboards().filter((item) => item.id !== dashboard.id);
     await host.setDashboards(remaining);
     redrawAll();
   }));
   heading.settingEl.addClass("property-logs-dashboard-heading");
   container.createEl("h3", { text: "Tracked property" });
-  new import_obsidian2.Setting(container).setName("Frontmatter property").setDesc("The live property that drives levels. Property Logs resolves its configured history key, or uses {property}Set.").addText((text) => text.setPlaceholder("relevant").setValue(dashboard.trackedPropertyKey).onChange(async (value) => {
+  new import_obsidian3.Setting(container).setName("Frontmatter property").setDesc("The live property that drives levels. Property Logs resolves its configured history key, or uses {property}Set.").addText((text) => text.setPlaceholder("relevant").setValue(dashboard.trackedPropertyKey).onChange(async (value) => {
     dashboard.trackedPropertyKey = value.trim();
     await save();
     await host.loadAllStatuses();
@@ -492,7 +1143,7 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
   const drawMappings = () => {
     mappingList.empty();
     Object.entries(dashboard.levelMapping).forEach(([value, mappedLevel2]) => {
-      new import_obsidian2.Setting(mappingList).setName(value).addDropdown((dropdown) => {
+      new import_obsidian3.Setting(mappingList).setName(value).addDropdown((dropdown) => {
         addLevelOptions(dropdown);
         dropdown.setValue(String(mappedLevel2)).onChange(async (next) => {
           dashboard.levelMapping[value] = Number(next);
@@ -516,7 +1167,7 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
     await save();
     drawMappings();
   };
-  new import_obsidian2.Setting(container).setName("Add value mapping").addText((text) => {
+  new import_obsidian3.Setting(container).setName("Add value mapping").addText((text) => {
     mappedValueInput = text;
     text.setPlaceholder("Property value");
     text.inputEl.addEventListener("keydown", (event2) => {
@@ -528,14 +1179,14 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
       mappedLevel = Number(value);
     });
   }).addButton((button) => button.setButtonText("Add").onClick(addMapping));
-  new import_obsidian2.Setting(container).setName("Level when history is unset").setDesc("Creates an implicit segment from the note creation date. Level 0 hides it.").addDropdown((dropdown) => {
+  new import_obsidian3.Setting(container).setName("Level when history is unset").setDesc("Creates an implicit segment from the note creation date. Level 0 hides it.").addDropdown((dropdown) => {
     addLevelOptions(dropdown);
     dropdown.setValue(String(dashboard.defaultLevelForUnset)).onChange(async (value) => {
       dashboard.defaultLevelForUnset = Number(value);
       await save();
     });
   });
-  new import_obsidian2.Setting(container).setName("Level for unmapped values").setDesc("Used for free text and existing values that are not in the map.").addDropdown((dropdown) => {
+  new import_obsidian3.Setting(container).setName("Level for unmapped values").setDesc("Used for free text and existing values that are not in the map.").addDropdown((dropdown) => {
     addLevelOptions(dropdown);
     dropdown.setValue(String(dashboard.unmappedValueLevel)).onChange(async (value) => {
       dashboard.unmappedValueLevel = Number(value);
@@ -546,29 +1197,31 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
   const colorSection = container.createDiv();
   const drawColors = () => {
     colorSection.empty();
-    if (dashboard.colorMode === "level") {
+    if (dashboard.colorMode === "value") {
+      renderValueColorMap(colorSection, dashboard, host, save);
+    } else if (dashboard.colorMode === "level") {
       colorSection.createEl("p", {
         text: "Choose a palette color once; it automatically adapts to light and dark themes. Level 0 remains hidden.",
         cls: "setting-item-description"
       });
       [0, 1, 2, 3, 4].forEach((level2) => {
         const row = colorSection.createDiv({ cls: "property-logs-color-row" });
-        const setting = new import_obsidian2.Setting(row).setName(`Level ${level2}`);
+        const setting = new import_obsidian3.Setting(row).setName(`Level ${level2}`);
         addPalettePicker(setting, dashboard.levelColors[level2], async (value) => {
           dashboard.levelColors[level2] = value;
           await save();
         });
       });
     } else {
-      new import_obsidian2.Setting(colorSection).setName("Color property").setDesc("A current frontmatter property such as tags, area, or owner.").addText((text) => text.setPlaceholder("tags").setValue(dashboard.colorProperty).onChange(async (value) => {
+      new import_obsidian3.Setting(colorSection).setName("Color property").setDesc("A current frontmatter property such as tags, area, or owner.").addText((text) => text.setPlaceholder("tags").setValue(dashboard.colorProperty).onChange(async (value) => {
         dashboard.colorProperty = value.trim();
         await save();
       }));
       renderColorMap(colorSection, dashboard, save);
     }
   };
-  new import_obsidian2.Setting(container).setName("Color bars by").addDropdown((dropdown) => dropdown.addOption("level", "Level").addOption("property", "Property").setValue(dashboard.colorMode).onChange(async (value) => {
-    dashboard.colorMode = value === "property" ? "property" : "level";
+  new import_obsidian3.Setting(container).setName("Color bars by").addDropdown((dropdown) => dropdown.addOption("level", "Level").addOption("property", "Property").addOption("value", "Tracked value").setValue(dashboard.colorMode).onChange(async (value) => {
+    dashboard.colorMode = value === "property" || value === "value" ? value : "level";
     await save();
     drawColors();
   }));
@@ -591,20 +1244,28 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
   renderStringList(excluded, "Tags", "Excluded tags take priority.", "hidden", scope.excludedTags, save);
   renderPropertyRules(excluded, "Properties", "Any matching rule excludes the note.", scope.excludedProperties, save);
   container.createEl("h3", { text: "Rows and toolbar" });
-  new import_obsidian2.Setting(container).setName("Open note from timeline block").setDesc("The other gesture opens the status value picker, so both actions remain available.").addDropdown((dropdown) => dropdown.addOption("ctrl-click", "Ctrl-click opens note; click changes value").addOption("click", "Click opens note; Ctrl-click changes value").setValue(dashboard.noteOpenGesture).onChange(async (value) => {
+  new import_obsidian3.Setting(container).setName("Open note from timeline block").setDesc("The other gesture opens the status value picker, so both actions remain available.").addDropdown((dropdown) => dropdown.addOption("ctrl-click", "Ctrl-click opens note; click changes value").addOption("click", "Click opens note; Ctrl-click changes value").setValue(dashboard.noteOpenGesture).onChange(async (value) => {
     dashboard.noteOpenGesture = value === "click" ? "click" : "ctrl-click";
     await save();
   }));
-  new import_obsidian2.Setting(container).setName("Properties beside note title").setDesc("Comma-separated frontmatter or history-entry keys. History keys show their latest value.").addText((text) => text.setPlaceholder("owner, tags, priority").setValue(dashboard.rowProperties.join(", ")).onChange(async (value) => {
+  new import_obsidian3.Setting(container).setName("Calendar axis").setDesc("Draws clickable day, week, month, quarter, and year cells with matching dividers.").addToggle((toggle) => toggle.setValue(dashboard.showPeriodAxis).onChange(async (value) => {
+    dashboard.showPeriodAxis = value;
+    await save();
+  }));
+  new import_obsidian3.Setting(container).setName("Notes from periodic notes").setDesc("Shows marked task lines such as `- [n] \u2026` from periodic notes on this timeline.").addToggle((toggle) => toggle.setValue(dashboard.showJournalNotes).onChange(async (value) => {
+    dashboard.showJournalNotes = value;
+    await save();
+  }));
+  new import_obsidian3.Setting(container).setName("Properties beside note title").setDesc("Comma-separated frontmatter or history-entry keys. History keys show their latest value.").addText((text) => text.setPlaceholder("owner, tags, priority").setValue(dashboard.rowProperties.join(", ")).onChange(async (value) => {
     dashboard.rowProperties = value.split(",").map((key) => key.trim()).filter(Boolean);
     await save();
   }));
-  new import_obsidian2.Setting(container).setName("Default group").setDesc("Use status, none, folder, level, or property:<key>. Status creates stacked note bars inside status rows.").addText((text) => text.setPlaceholder("status or property:area").setValue(dashboard.groupBy).onChange(async (value) => {
+  new import_obsidian3.Setting(container).setName("Default group").setDesc("Use status, none, folder, level, or property:<key>. Status creates stacked note bars inside status rows.").addText((text) => text.setPlaceholder("status or property:area").setValue(dashboard.groupBy).onChange(async (value) => {
     const trimmed = value.trim();
     dashboard.groupBy = trimmed === "status" || trimmed === "folder" || trimmed === "level" || trimmed.startsWith("property:") ? trimmed : "none";
     await save();
   }));
-  new import_obsidian2.Setting(container).setName("Default sort").setDesc("Use alphabetical, level, recent, or property:<key>.").addText((text) => text.setPlaceholder("alphabetical or property:priority").setValue(dashboard.sortBy).onChange(async (value) => {
+  new import_obsidian3.Setting(container).setName("Default sort").setDesc("Use alphabetical, level, recent, or property:<key>.").addText((text) => text.setPlaceholder("alphabetical or property:priority").setValue(dashboard.sortBy).onChange(async (value) => {
     const trimmed = value.trim();
     dashboard.sortBy = trimmed === "level" || trimmed === "recent" || trimmed.startsWith("property:") ? trimmed : "alphabetical";
     await save();
@@ -632,7 +1293,7 @@ function renderDashboardSettingsPane(pane, host) {
       if (active) renderDashboardEditor(editor, active, host, redraw);
       else editor.empty();
     };
-    new import_obsidian2.Setting(chooser).setName("Configured dashboards").addDropdown((dropdown) => {
+    new import_obsidian3.Setting(chooser).setName("Configured dashboards").addDropdown((dropdown) => {
       dashboards.forEach((dashboard) => dropdown.addOption(dashboard.id, dashboard.name));
       if (active) dropdown.setValue(active.id);
       dropdown.onChange((id) => {
@@ -651,8 +1312,328 @@ function renderDashboardSettingsPane(pane, host) {
   redraw();
 }
 
-// view/TimelineView.ts
+// settings/periodicSettings.ts
+var import_obsidian4 = require("obsidian");
+var WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+var PERIOD_LABELS = {
+  day: "Daily note",
+  week: "Weekly note",
+  month: "Monthly note",
+  quarter: "Quarterly note",
+  year: "Yearly note"
+};
+function renderPeriodicSettingsPane(pane, host) {
+  pane.createEl("p", {
+    text: host.hasJournalsPlugin() ? "The Journals plugin was detected, so clicking a day, week, month, quarter, or year on the timeline opens the matching journal note." : "Install the Journals plugin to open weekly, monthly, quarterly, and yearly notes from the timeline. Without it, only daily notes can be opened.",
+    cls: "setting-item-description"
+  });
+  new import_obsidian4.Setting(pane).setName("Week starts on").setDesc("Used for the week cells and dividers on the timeline axis.").addDropdown((dropdown) => {
+    WEEKDAYS.forEach((day, index) => dropdown.addOption(String(index), day));
+    dropdown.setValue(String(host.getWeekStartsOn())).onChange(async (value) => {
+      await host.setWeekStartsOn(Number(value));
+    });
+  });
+  pane.createEl("h3", { text: "Embedded dashboards" });
+  pane.createEl("p", {
+    text: "A ```property-logs code block centers on the period of the note it lives in. These spans decide how much calendar context each note type shows; a block can override them with zoom: 30d.",
+    cls: "setting-item-description"
+  });
+  PERIOD_GRANULARITIES.forEach((granularity) => {
+    new import_obsidian4.Setting(pane).setName(PERIOD_LABELS[granularity]).setDesc(`Days of context shown around the period (default ${DEFAULT_PERIOD_WINDOW_DAYS[granularity]}).`).addText((text) => {
+      text.setPlaceholder(String(DEFAULT_PERIOD_WINDOW_DAYS[granularity])).setValue(String(host.getPeriodWindowDays()[granularity])).onChange(async (value) => {
+        const days = Number(value);
+        if (!Number.isFinite(days) || days < 1) return;
+        await host.setPeriodWindowDays({
+          ...host.getPeriodWindowDays(),
+          [granularity]: Math.round(days)
+        });
+      });
+      text.inputEl.type = "number";
+      text.inputEl.min = "1";
+    });
+  });
+  pane.createEl("h3", { text: "Notes from periodic notes" });
+  pane.createEl("p", {
+    text: "A task line in a periodic note becomes a note on that note's date. For example, `- [n] Felt good about this` uses the n marker below. Markers match Obsidian's checkbox syntax, so the same characters your theme styles work here.",
+    cls: "setting-item-description"
+  });
+  const list = pane.createDiv({ cls: "property-logs-map-list" });
+  const draw = () => {
+    list.empty();
+    const markers = host.getJournalMarkers();
+    if (markers.length === 0) {
+      list.createEl("p", {
+        text: "No markers configured, so periodic-note lines are ignored.",
+        cls: "setting-item-description"
+      });
+    }
+    markers.forEach((marker, index) => {
+      const row = list.createDiv({ cls: "property-logs-map-row" });
+      const setting = new import_obsidian4.Setting(row).setName(`- [${marker.marker}]`);
+      const preview = setting.nameEl.createSpan({ cls: "property-logs-marker-preview" });
+      preview.style.setProperty(
+        "--property-logs-marker-color",
+        paletteCssColor(marker.color) ?? marker.color
+      );
+      (0, import_obsidian4.setIcon)(preview, marker.icon);
+      setting.addText((text) => {
+        text.setPlaceholder("Label").setValue(marker.label).onChange(async (value) => {
+          marker.label = value.trim() || marker.marker;
+          await host.setJournalMarkers(markers);
+        });
+        text.inputEl.addClass("property-logs-marker-label-input");
+      });
+      setting.addText((text) => {
+        text.setPlaceholder("lucide icon").setValue(marker.icon).onChange(async (value) => {
+          marker.icon = value.trim() || "message-square";
+          await host.setJournalMarkers(markers);
+          (0, import_obsidian4.setIcon)(preview, marker.icon);
+        });
+        text.inputEl.addClass("property-logs-marker-icon-input");
+      });
+      addPalettePicker(setting, marker.color, async (color2) => {
+        marker.color = color2;
+        preview.style.setProperty("--property-logs-marker-color", paletteCssColor(color2) ?? color2);
+        await host.setJournalMarkers(markers);
+      });
+      setting.addExtraButton((button) => button.setIcon("trash").setTooltip(`Remove ${marker.marker}`).onClick(async () => {
+        const next = markers.filter((_item, position) => position !== index);
+        await host.setJournalMarkers(next);
+        draw();
+      }));
+    });
+  };
+  draw();
+  let markerInput;
+  let labelInput;
+  let iconInput;
+  let color = DEFAULT_PROPERTY_COLOR;
+  const add = async () => {
+    const marker = markerInput.getValue().trim().slice(0, 1);
+    if (!marker) return;
+    const markers = host.getJournalMarkers();
+    if (markers.some((item) => item.marker === marker)) return;
+    await host.setJournalMarkers([...markers, {
+      marker,
+      label: labelInput.getValue().trim() || marker,
+      icon: iconInput.getValue().trim() || "message-square",
+      color
+    }]);
+    markerInput.setValue("");
+    labelInput.setValue("");
+    iconInput.setValue("");
+    draw();
+  };
+  const addSetting = new import_obsidian4.Setting(pane).setName("Add marker").setDesc("The character between the brackets, plus the icon and color it shows on the timeline.").addText((text) => {
+    markerInput = text;
+    text.setPlaceholder("n");
+    text.inputEl.maxLength = 1;
+    text.inputEl.addClass("property-logs-marker-char-input");
+  }).addText((text) => {
+    labelInput = text;
+    text.setPlaceholder("Note");
+  }).addText((text) => {
+    iconInput = text;
+    text.setPlaceholder("pencil");
+    text.inputEl.addEventListener("keydown", (event2) => {
+      if (event2.key === "Enter") void add();
+    });
+  });
+  addPalettePicker(addSetting, color, (next) => {
+    color = next;
+  });
+  addSetting.addButton((button) => button.setButtonText("Add").setCta().onClick(add));
+  new import_obsidian4.Setting(pane).setName("Restore default markers").setDesc("Replaces the list above with n, !, ?, i, *, and b.").addButton((button) => button.setButtonText("Restore").onClick(async () => {
+    await host.setJournalMarkers(DEFAULT_JOURNAL_MARKERS.map((marker) => ({ ...marker })));
+    draw();
+  }));
+}
+
+// settings/valueSettings.ts
 var import_obsidian5 = require("obsidian");
+function addLevelOptions2(dropdown) {
+  dropdown.addOption("inherit", "No default level");
+  for (let level2 = 0; level2 <= 4; level2++) dropdown.addOption(String(level2), `Level ${level2}`);
+}
+function renderValueSettingsPane(pane, host) {
+  pane.createEl("p", {
+    text: "Set a level and color once per property value and every dashboard picks them up. A dashboard's own value mapping or color overrides the default here.",
+    cls: "setting-item-description"
+  });
+  const list = pane.createDiv({ cls: "property-logs-map-list" });
+  const save = async () => {
+    await host.save();
+    host.refreshDashboardViews();
+  };
+  const draw = () => {
+    list.empty();
+    const styles = host.getGlobalValueStyles();
+    const values2 = Object.keys(styles).sort((first, second) => first.localeCompare(second, void 0, { numeric: true, sensitivity: "base" }));
+    if (values2.length === 0) {
+      list.createEl("p", {
+        text: "No global values yet.",
+        cls: "setting-item-description"
+      });
+      return;
+    }
+    values2.forEach((value) => {
+      const style = styles[value];
+      const row = list.createDiv({ cls: "property-logs-map-row" });
+      const setting = new import_obsidian5.Setting(row).setName(value);
+      setting.addDropdown((dropdown) => {
+        addLevelOptions2(dropdown);
+        dropdown.setValue(style.level === null ? "inherit" : String(style.level)).onChange(async (next) => {
+          style.level = next === "inherit" ? null : Number(next);
+          await save();
+        });
+      });
+      addPalettePicker(setting, style.color ?? "", async (color2) => {
+        style.color = color2;
+        await save();
+      });
+      setting.addExtraButton((button) => button.setIcon("trash").setTooltip(`Remove ${value}`).onClick(async () => {
+        delete host.getGlobalValueStyles()[value];
+        await save();
+        draw();
+      }));
+    });
+  };
+  draw();
+  let valueInput;
+  let level2 = null;
+  let color = DEFAULT_PROPERTY_COLOR;
+  const add = async () => {
+    const value = valueInput.getValue().trim();
+    if (!value) return;
+    host.getGlobalValueStyles()[value] = { level: level2, color };
+    valueInput.setValue("");
+    await save();
+    draw();
+  };
+  const addSetting = new import_obsidian5.Setting(pane).setName("Add global value").setDesc("The value as it appears in frontmatter, such as Active or Blocked.").addText((text) => {
+    valueInput = text;
+    text.setPlaceholder("Active");
+    text.inputEl.addEventListener("keydown", (event2) => {
+      if (event2.key === "Enter") void add();
+    });
+  }).addDropdown((dropdown) => {
+    addLevelOptions2(dropdown);
+    dropdown.setValue("inherit").onChange((next) => {
+      level2 = next === "inherit" ? null : Number(next);
+    });
+  });
+  addPalettePicker(addSetting, color, (next) => {
+    color = next;
+  });
+  addSetting.addButton((button) => button.setButtonText("Add").setCta().onClick(add));
+}
+
+// view/DashboardEmbed.ts
+var import_obsidian9 = require("obsidian");
+
+// data/embedOptions.ts
+var DURATION = /^(\d+(?:\.\d+)?)\s*(d|w|m|q|y|days?|weeks?|months?|quarters?|years?)$/i;
+var DURATION_DAYS = {
+  d: 1,
+  w: 7,
+  m: 30.44,
+  q: 91.31,
+  y: 365.25
+};
+function parseDuration(value) {
+  const match = DURATION.exec(value.trim());
+  if (!match) return null;
+  const unit = match[2][0].toLowerCase();
+  const days = Number(match[1]) * (DURATION_DAYS[unit] ?? 1);
+  return days >= 1 ? Math.round(days) : null;
+}
+function parseBoolean(value) {
+  const normalized = value.trim().toLowerCase();
+  if (["true", "yes", "on", "1", "show"].includes(normalized)) return true;
+  if (["false", "no", "off", "0", "hide", "none"].includes(normalized)) return false;
+  return null;
+}
+function parseEmbedOptions(source) {
+  const options = {
+    dashboard: "",
+    date: null,
+    period: null,
+    windowDays: null,
+    height: null,
+    header: true,
+    errors: []
+  };
+  source.split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("//")) return;
+    const separator = trimmed.indexOf(":");
+    if (separator === -1) {
+      options.errors.push(`Could not read "${trimmed}". Use key: value.`);
+      return;
+    }
+    const key = trimmed.slice(0, separator).trim().toLowerCase();
+    const value = trimmed.slice(separator + 1).trim();
+    if (!value) return;
+    switch (key) {
+      case "dashboard":
+        options.dashboard = value;
+        break;
+      case "date": {
+        if (value.toLowerCase() === "auto") break;
+        if (value.toLowerCase() === "today") {
+          options.date = /* @__PURE__ */ new Date();
+          break;
+        }
+        const date2 = parseDateString(value);
+        if (date2) options.date = date2;
+        else options.errors.push(`"${value}" is not a YYYY-MM-DD date.`);
+        break;
+      }
+      case "period": {
+        if (value.toLowerCase() === "auto") break;
+        if (isPeriodGranularity(value.toLowerCase())) {
+          options.period = value.toLowerCase();
+        } else {
+          options.errors.push(`"${value}" is not a period type (day, week, month, quarter, year).`);
+        }
+        break;
+      }
+      case "zoom": {
+        if (value.toLowerCase() === "auto") break;
+        const duration = parseDuration(value);
+        if (duration !== null) {
+          options.windowDays = duration;
+          break;
+        }
+        const plain = Number(value);
+        if (Number.isFinite(plain) && plain >= 1) {
+          options.windowDays = Math.round(plain);
+          break;
+        }
+        options.errors.push(`"${value}" is not a zoom span such as 30d, 6w, or 1y.`);
+        break;
+      }
+      case "height": {
+        const height = Number(value.replace(/px$/i, ""));
+        if (Number.isFinite(height) && height >= 80) options.height = Math.round(height);
+        else options.errors.push(`"${value}" is not a height in pixels (minimum 80).`);
+        break;
+      }
+      case "header": {
+        const header = parseBoolean(value);
+        if (header === null) options.errors.push(`"${value}" is not true or false.`);
+        else options.header = header;
+        break;
+      }
+      default:
+        options.errors.push(`Unknown option "${key}".`);
+    }
+  });
+  return options;
+}
+
+// view/DashboardTimeline.ts
+var import_obsidian8 = require("obsidian");
 
 // node_modules/vis-timeline/standalone/esm/vis-timeline-graph2d.mjs
 var commonjsGlobal = typeof globalThis !== "undefined" ? globalThis : typeof window !== "undefined" ? window : typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : {};
@@ -4674,7 +5655,7 @@ function requireDe() {
   (function(module2, exports2) {
     (function(global2, factory) {
       typeof commonjsRequire === "function" ? factory(requireMoment()) : factory(global2.moment);
-    })(de$1, (function(moment3) {
+    })(de$1, (function(moment4) {
       function processRelativeTime(number2, withoutSuffix, key, isFuture) {
         var format = {
           m: ["eine Minute", "einer Minute"],
@@ -4689,7 +5670,7 @@ function requireDe() {
         };
         return withoutSuffix ? format[key][0] : format[key][1];
       }
-      var de2 = moment3.defineLocale("de", {
+      var de2 = moment4.defineLocale("de", {
         months: "Januar_Februar_M\xE4rz_April_Mai_Juni_Juli_August_September_Oktober_November_Dezember".split(
           "_"
         ),
@@ -4759,7 +5740,7 @@ function requireEs() {
   (function(module2, exports2) {
     (function(global2, factory) {
       typeof commonjsRequire === "function" ? factory(requireMoment()) : factory(global2.moment);
-    })(es$1, (function(moment3) {
+    })(es$1, (function(moment4) {
       var monthsShortDot = "ene._feb._mar._abr._may._jun._jul._ago._sep._oct._nov._dic.".split(
         "_"
       ), monthsShort = "ene_feb_mar_abr_may_jun_jul_ago_sep_oct_nov_dic".split("_"), monthsParse = [
@@ -4776,7 +5757,7 @@ function requireEs() {
         /^nov/i,
         /^dic/i
       ], monthsRegex = /^(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|ene\.?|feb\.?|mar\.?|abr\.?|may\.?|jun\.?|jul\.?|ago\.?|sep\.?|oct\.?|nov\.?|dic\.?)/i;
-      var es2 = moment3.defineLocale("es", {
+      var es2 = moment4.defineLocale("es", {
         months: "enero_febrero_marzo_abril_mayo_junio_julio_agosto_septiembre_octubre_noviembre_diciembre".split(
           "_"
         ),
@@ -4869,7 +5850,7 @@ function requireFr() {
   (function(module2, exports2) {
     (function(global2, factory) {
       typeof commonjsRequire === "function" ? factory(requireMoment()) : factory(global2.moment);
-    })(fr$1, (function(moment3) {
+    })(fr$1, (function(moment4) {
       var monthsStrictRegex = /^(janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)/i, monthsShortStrictRegex = /(janv\.?|févr\.?|mars|avr\.?|mai|juin|juil\.?|août|sept\.?|oct\.?|nov\.?|déc\.?)/i, monthsRegex = /(janv\.?|févr\.?|mars|avr\.?|mai|juin|juil\.?|août|sept\.?|oct\.?|nov\.?|déc\.?|janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)/i, monthsParse = [
         /^janv/i,
         /^févr/i,
@@ -4884,7 +5865,7 @@ function requireFr() {
         /^nov/i,
         /^déc/i
       ];
-      var fr2 = moment3.defineLocale("fr", {
+      var fr2 = moment4.defineLocale("fr", {
         months: "janvier_f\xE9vrier_mars_avril_mai_juin_juillet_ao\xFBt_septembre_octobre_novembre_d\xE9cembre".split(
           "_"
         ),
@@ -4979,8 +5960,8 @@ function requireIt() {
   (function(module2, exports2) {
     (function(global2, factory) {
       typeof commonjsRequire === "function" ? factory(requireMoment()) : factory(global2.moment);
-    })(it$1, (function(moment3) {
-      var it2 = moment3.defineLocale("it", {
+    })(it$1, (function(moment4) {
+      var it2 = moment4.defineLocale("it", {
         months: "gennaio_febbraio_marzo_aprile_maggio_giugno_luglio_agosto_settembre_ottobre_novembre_dicembre".split(
           "_"
         ),
@@ -5063,8 +6044,8 @@ function requireJa() {
   (function(module2, exports2) {
     (function(global2, factory) {
       typeof commonjsRequire === "function" ? factory(requireMoment()) : factory(global2.moment);
-    })(ja$1, (function(moment3) {
-      var ja2 = moment3.defineLocale("ja", {
+    })(ja$1, (function(moment4) {
+      var ja2 = moment4.defineLocale("ja", {
         eras: [
           {
             since: "2019-05-01",
@@ -5221,7 +6202,7 @@ function requireNl() {
   (function(module2, exports2) {
     (function(global2, factory) {
       typeof commonjsRequire === "function" ? factory(requireMoment()) : factory(global2.moment);
-    })(nl$1, (function(moment3) {
+    })(nl$1, (function(moment4) {
       var monthsShortWithDots = "jan._feb._mrt._apr._mei_jun._jul._aug._sep._okt._nov._dec.".split("_"), monthsShortWithoutDots = "jan_feb_mrt_apr_mei_jun_jul_aug_sep_okt_nov_dec".split("_"), monthsParse = [
         /^jan/i,
         /^feb/i,
@@ -5236,7 +6217,7 @@ function requireNl() {
         /^nov/i,
         /^dec/i
       ], monthsRegex = /^(januari|februari|maart|april|mei|ju[nl]i|augustus|september|oktober|november|december|jan\.?|feb\.?|mrt\.?|apr\.?|ju[nl]\.?|aug\.?|sep\.?|okt\.?|nov\.?|dec\.?)/i;
-      var nl2 = moment3.defineLocale("nl", {
+      var nl2 = moment4.defineLocale("nl", {
         months: "januari_februari_maart_april_mei_juni_juli_augustus_september_oktober_november_december".split(
           "_"
         ),
@@ -5320,7 +6301,7 @@ function requirePl() {
   (function(module2, exports2) {
     (function(global2, factory) {
       typeof commonjsRequire === "function" ? factory(requireMoment()) : factory(global2.moment);
-    })(pl$1, (function(moment3) {
+    })(pl$1, (function(moment4) {
       var monthsNominative = "stycze\u0144_luty_marzec_kwiecie\u0144_maj_czerwiec_lipiec_sierpie\u0144_wrzesie\u0144_pa\u017Adziernik_listopad_grudzie\u0144".split(
         "_"
       ), monthsSubjective = "stycznia_lutego_marca_kwietnia_maja_czerwca_lipca_sierpnia_wrze\u015Bnia_pa\u017Adziernika_listopada_grudnia".split(
@@ -5363,7 +6344,7 @@ function requirePl() {
             return result + (plural(number2) ? "lata" : "lat");
         }
       }
-      var pl2 = moment3.defineLocale("pl", {
+      var pl2 = moment4.defineLocale("pl", {
         months: function(momentToFormat, format) {
           if (!momentToFormat) {
             return monthsNominative;
@@ -5462,7 +6443,7 @@ function requireRu() {
   (function(module2, exports2) {
     (function(global2, factory) {
       typeof commonjsRequire === "function" ? factory(requireMoment()) : factory(global2.moment);
-    })(ru$1, (function(moment3) {
+    })(ru$1, (function(moment4) {
       function plural(word, num) {
         var forms = word.split("_");
         return num % 10 === 1 && num % 100 !== 11 ? forms[0] : num % 10 >= 2 && num % 10 <= 4 && (num % 100 < 10 || num % 100 >= 20) ? forms[1] : forms[2];
@@ -5497,7 +6478,7 @@ function requireRu() {
         /^ноя/i,
         /^дек/i
       ];
-      var ru2 = moment3.defineLocale("ru", {
+      var ru2 = moment4.defineLocale("ru", {
         months: {
           format: "\u044F\u043D\u0432\u0430\u0440\u044F_\u0444\u0435\u0432\u0440\u0430\u043B\u044F_\u043C\u0430\u0440\u0442\u0430_\u0430\u043F\u0440\u0435\u043B\u044F_\u043C\u0430\u044F_\u0438\u044E\u043D\u044F_\u0438\u044E\u043B\u044F_\u0430\u0432\u0433\u0443\u0441\u0442\u0430_\u0441\u0435\u043D\u0442\u044F\u0431\u0440\u044F_\u043E\u043A\u0442\u044F\u0431\u0440\u044F_\u043D\u043E\u044F\u0431\u0440\u044F_\u0434\u0435\u043A\u0430\u0431\u0440\u044F".split(
             "_"
@@ -5666,7 +6647,7 @@ function requireTr() {
   (function(module2, exports2) {
     (function(global2, factory) {
       typeof commonjsRequire === "function" ? factory(requireMoment()) : factory(global2.moment);
-    })(tr$1, (function(moment3) {
+    })(tr$1, (function(moment4) {
       var suffixes = {
         1: "'inci",
         5: "'inci",
@@ -5687,7 +6668,7 @@ function requireTr() {
         60: "'\u0131nc\u0131",
         90: "'\u0131nc\u0131"
       };
-      var tr2 = moment3.defineLocale("tr", {
+      var tr2 = moment4.defineLocale("tr", {
         months: "Ocak_\u015Eubat_Mart_Nisan_May\u0131s_Haziran_Temmuz_A\u011Fustos_Eyl\xFCl_Ekim_Kas\u0131m_Aral\u0131k".split(
           "_"
         ),
@@ -5779,7 +6760,7 @@ function requireUk() {
   (function(module2, exports2) {
     (function(global2, factory) {
       typeof commonjsRequire === "function" ? factory(requireMoment()) : factory(global2.moment);
-    })(uk$1, (function(moment3) {
+    })(uk$1, (function(moment4) {
       function plural(word, num) {
         var forms = word.split("_");
         return num % 10 === 1 && num % 100 !== 11 ? forms[0] : num % 10 >= 2 && num % 10 <= 4 && (num % 100 < 10 || num % 100 >= 20) ? forms[1] : forms[2];
@@ -5827,7 +6808,7 @@ function requireUk() {
           return str + "\u043E" + (this.hours() === 11 ? "\u0431" : "") + "] LT";
         };
       }
-      var uk2 = moment3.defineLocale("uk", {
+      var uk2 = moment4.defineLocale("uk", {
         months: {
           format: "\u0441\u0456\u0447\u043D\u044F_\u043B\u044E\u0442\u043E\u0433\u043E_\u0431\u0435\u0440\u0435\u0437\u043D\u044F_\u043A\u0432\u0456\u0442\u043D\u044F_\u0442\u0440\u0430\u0432\u043D\u044F_\u0447\u0435\u0440\u0432\u043D\u044F_\u043B\u0438\u043F\u043D\u044F_\u0441\u0435\u0440\u043F\u043D\u044F_\u0432\u0435\u0440\u0435\u0441\u043D\u044F_\u0436\u043E\u0432\u0442\u043D\u044F_\u043B\u0438\u0441\u0442\u043E\u043F\u0430\u0434\u0430_\u0433\u0440\u0443\u0434\u043D\u044F".split(
             "_"
@@ -28180,9 +29161,9 @@ function requireRepeat() {
 }
 var repeatExports = requireRepeat();
 var _repeatInstanceProperty = /* @__PURE__ */ getDefaultExportFromCjs(repeatExports);
-function convertHiddenOptions(moment3, body, hiddenDates) {
+function convertHiddenOptions(moment4, body, hiddenDates) {
   if (hiddenDates && !_Array$isArray(hiddenDates)) {
-    return convertHiddenOptions(moment3, body, [hiddenDates]);
+    return convertHiddenOptions(moment4, body, [hiddenDates]);
   }
   body.hiddenDates = [];
   if (hiddenDates) {
@@ -28191,8 +29172,8 @@ function convertHiddenOptions(moment3, body, hiddenDates) {
       for (let i2 = 0; i2 < hiddenDates.length; i2++) {
         if (_repeatInstanceProperty(hiddenDates[i2]) === void 0) {
           const dateItem = {};
-          dateItem.start = moment3(hiddenDates[i2].start).toDate().valueOf();
-          dateItem.end = moment3(hiddenDates[i2].end).toDate().valueOf();
+          dateItem.start = moment4(hiddenDates[i2].start).toDate().valueOf();
+          dateItem.end = moment4(hiddenDates[i2].end).toDate().valueOf();
           body.hiddenDates.push(dateItem);
         }
       }
@@ -28200,20 +29181,20 @@ function convertHiddenOptions(moment3, body, hiddenDates) {
     }
   }
 }
-function updateHiddenDates(moment3, body, hiddenDates) {
+function updateHiddenDates(moment4, body, hiddenDates) {
   if (hiddenDates && !_Array$isArray(hiddenDates)) {
-    return updateHiddenDates(moment3, body, [hiddenDates]);
+    return updateHiddenDates(moment4, body, [hiddenDates]);
   }
   if (hiddenDates && body.domProps.centerContainer.width !== void 0) {
-    convertHiddenOptions(moment3, body, hiddenDates);
-    const start = moment3(body.range.start);
-    const end = moment3(body.range.end);
+    convertHiddenOptions(moment4, body, hiddenDates);
+    const start = moment4(body.range.start);
+    const end = moment4(body.range.end);
     const totalRange = body.range.end - body.range.start;
     const pixelTime = totalRange / body.domProps.centerContainer.width;
     for (let i2 = 0; i2 < hiddenDates.length; i2++) {
       if (_repeatInstanceProperty(hiddenDates[i2]) !== void 0) {
-        let startDate = moment3(hiddenDates[i2].start);
-        let endDate = moment3(hiddenDates[i2].end);
+        let startDate = moment4(hiddenDates[i2].start);
+        let endDate = moment4(hiddenDates[i2].end);
         if (startDate._d == "Invalid Date") {
           throw new Error("Supplied start date is not valid: ".concat(hiddenDates[i2].start));
         }
@@ -28340,7 +29321,7 @@ function removeDuplicates(body) {
   body.hiddenDates = safeDates;
   _sortInstanceProperty(_context2 = body.hiddenDates).call(_context2, (a, b) => a.start - b.start);
 }
-function stepOverHiddenDates(moment3, timeStep, previousTime) {
+function stepOverHiddenDates(moment4, timeStep, previousTime) {
   let stepInHidden = false;
   const currentValue = timeStep.current.valueOf();
   for (let i2 = 0; i2 < timeStep.hiddenDates.length; i2++) {
@@ -28352,8 +29333,8 @@ function stepOverHiddenDates(moment3, timeStep, previousTime) {
     }
   }
   if (stepInHidden == true && currentValue < timeStep._end.valueOf() && currentValue != previousTime) {
-    const prevValue = moment3(previousTime);
-    const newValue = moment3(endDate);
+    const prevValue = moment4(previousTime);
+    const newValue = moment4(endDate);
     if (prevValue.year() != newValue.year()) {
       timeStep.switchedYear = true;
     } else if (prevValue.month() != newValue.month()) {
@@ -28430,14 +29411,14 @@ function getHiddenDurationBeforeStart(hiddenDates, start, end) {
   }
   return duration;
 }
-function correctTimeForHidden(moment3, hiddenDates, range, time) {
-  time = moment3(time).toDate().valueOf();
-  time -= getHiddenDurationBefore(moment3, hiddenDates, range, time);
+function correctTimeForHidden(moment4, hiddenDates, range, time) {
+  time = moment4(time).toDate().valueOf();
+  time -= getHiddenDurationBefore(moment4, hiddenDates, range, time);
   return time;
 }
-function getHiddenDurationBefore(moment3, hiddenDates, range, time) {
+function getHiddenDurationBefore(moment4, hiddenDates, range, time) {
   let timeOffset = 0;
-  time = moment3(time).toDate().valueOf();
+  time = moment4(time).toDate().valueOf();
   for (let i2 = 0; i2 < hiddenDates.length; i2++) {
     const startDate = hiddenDates[i2].start;
     const endDate = hiddenDates[i2].end;
@@ -28543,8 +29524,8 @@ var TimeStep = class _TimeStep {
    * to UTC or to set a utcOffset.
    * @param {function} moment
    */
-  setMoment(moment3) {
-    this.moment = moment3;
+  setMoment(moment4) {
+    this.moment = moment4;
     this.current = this.moment(this.current.valueOf());
     this._start = this.moment(this._start.valueOf());
     this._end = this.moment(this._end.valueOf());
@@ -37513,7 +38494,7 @@ var array = "array";
 var date = "date";
 var object = "object";
 var dom = "dom";
-var moment = "moment";
+var moment2 = "moment";
 var any = "any";
 var allOptions = {
   configure: {
@@ -37628,7 +38609,7 @@ var allOptions = {
     number,
     date,
     string,
-    moment
+    moment: moment2
   },
   format: {
     minorLabels: {
@@ -37759,13 +38740,13 @@ var allOptions = {
       date,
       number,
       string,
-      moment
+      moment: moment2
     },
     end: {
       date,
       number,
       string,
-      moment
+      moment: moment2
     },
     repeat: {
       string
@@ -37833,7 +38814,7 @@ var allOptions = {
     date,
     number,
     string,
-    moment
+    moment: moment2
   },
   maxHeight: {
     number,
@@ -37846,7 +38827,7 @@ var allOptions = {
     date,
     number,
     string,
-    moment
+    moment: moment2
   },
   minHeight: {
     number,
@@ -37966,7 +38947,7 @@ var allOptions = {
     date,
     number,
     string,
-    moment
+    moment: moment2
   },
   template: {
     function: "function"
@@ -38870,8 +39851,10 @@ function normalizeScalar(value) {
   return null;
 }
 function resolveLevel(value, options, issues, entryIndex) {
-  if (!hasOwn(options.levelMapping, value)) return options.unmappedValueLevel;
-  const configuredLevel = options.levelMapping[value];
+  const globalMapping = options.globalLevelMapping ?? {};
+  const mapped = hasOwn(options.levelMapping, value) ? options.levelMapping : hasOwn(globalMapping, value) ? globalMapping : null;
+  if (!mapped) return options.unmappedValueLevel;
+  const configuredLevel = mapped[value];
   if (Number.isInteger(configuredLevel) && configuredLevel >= 0 && configuredLevel <= 4) {
     return configuredLevel;
   }
@@ -38889,7 +39872,17 @@ function resolvePropertyColorKey(value, colorPropertyMap) {
   }
   return normalizeScalar(value);
 }
-function resolveColor(level2, options, issues, entryIndex) {
+function resolveColor(level2, value, options, issues, entryIndex) {
+  if (options.colorMode === "value") {
+    const valueColor = value === null ? void 0 : options.valueColors?.[value]?.trim();
+    if (valueColor && isSupportedTimelineColor(valueColor)) return valueColor;
+    issues.push({
+      code: "unmapped-color",
+      entryIndex,
+      message: value === null ? "This note has no tracked value to color by." : `Value "${value}" does not have a configured color.`
+    });
+    return void 0;
+  }
   if (options.colorMode === "level") {
     const color2 = options.levelColors[level2]?.trim();
     if (color2 && isSupportedTimelineColor(color2)) return color2;
@@ -39011,7 +40004,7 @@ function reconstructHistorySegments(options) {
         end: today,
         value: null,
         level: level2,
-        color: resolveColor(level2, options, issues),
+        color: resolveColor(level2, null, options, issues),
         implicit: true
       });
     }
@@ -39028,7 +40021,7 @@ function reconstructHistorySegments(options) {
         end: coalescedChanges[index + 1]?.date ?? today,
         value: change.value,
         level: level2,
-        color: resolveColor(level2, options, issues, change.sourceIndex),
+        color: resolveColor(level2, change.value, options, issues, change.sourceIndex),
         implicit: false,
         sourceIndex: change.sourceIndex
       });
@@ -39045,11 +40038,11 @@ function reconstructHistorySegments(options) {
 }
 
 // modals/AddTopicModal.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 
 // modals/SetValueModal.ts
-var import_obsidian3 = require("obsidian");
-var CustomValueModal = class extends import_obsidian3.Modal {
+var import_obsidian6 = require("obsidian");
+var CustomValueModal = class extends import_obsidian6.Modal {
   constructor(app, onSubmit) {
     super(app);
     this.onSubmit = onSubmit;
@@ -39057,7 +40050,7 @@ var CustomValueModal = class extends import_obsidian3.Modal {
   }
   onOpen() {
     this.titleEl.setText("Set custom value");
-    new import_obsidian3.Setting(this.contentEl).setName("Value").addText((text) => {
+    new import_obsidian6.Setting(this.contentEl).setName("Value").addText((text) => {
       text.setPlaceholder("Enter any value").onChange((value) => {
         this.value = value;
       });
@@ -39066,7 +40059,7 @@ var CustomValueModal = class extends import_obsidian3.Modal {
       });
       window.setTimeout(() => text.inputEl.focus(), 50);
     });
-    new import_obsidian3.Setting(this.contentEl).addButton((button) => button.setButtonText("Set value").setCta().onClick(() => this.submit())).addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()));
+    new import_obsidian6.Setting(this.contentEl).addButton((button) => button.setButtonText("Set value").setCta().onClick(() => this.submit())).addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()));
   }
   onClose() {
     this.contentEl.empty();
@@ -39079,11 +40072,11 @@ var CustomValueModal = class extends import_obsidian3.Modal {
       this.close();
     } catch (error) {
       console.error("Property Logs: failed to set custom value", error);
-      new import_obsidian3.Notice("Property Logs could not update this note.");
+      new import_obsidian6.Notice("Property Logs could not update this note.");
     }
   }
 };
-var SetValueModal = class extends import_obsidian3.FuzzySuggestModal {
+var SetValueModal = class extends import_obsidian6.FuzzySuggestModal {
   constructor(app, writer, file, dashboard) {
     super(app);
     this.writer = writer;
@@ -39122,7 +40115,7 @@ var SetValueModal = class extends import_obsidian3.FuzzySuggestModal {
       this.writer.refreshDashboardViews();
     } catch (error) {
       console.error("Property Logs: failed to set value", error);
-      new import_obsidian3.Notice("Property Logs could not update this note.");
+      new import_obsidian6.Notice("Property Logs could not update this note.");
       throw error;
     }
   }
@@ -39132,7 +40125,7 @@ function openValuePicker(writer, file, dashboard) {
 }
 
 // modals/AddTopicModal.ts
-var ExistingNoteModal = class extends import_obsidian4.FuzzySuggestModal {
+var ExistingNoteModal = class extends import_obsidian7.FuzzySuggestModal {
   constructor(app, host, dashboard) {
     super(app);
     this.host = host;
@@ -39147,14 +40140,14 @@ var ExistingNoteModal = class extends import_obsidian4.FuzzySuggestModal {
   }
   onChooseItem(file) {
     if (this.host.noteHasTrackedHistory(file, this.dashboard)) {
-      new import_obsidian4.Notice(`${file.basename} already has timeline history.`);
+      new import_obsidian7.Notice(`${file.basename} already has timeline history.`);
       this.host.refreshDashboardViews();
       return;
     }
     openValuePicker(this.host, file, this.dashboard);
   }
 };
-var NewNoteModal = class extends import_obsidian4.Modal {
+var NewNoteModal = class extends import_obsidian7.Modal {
   constructor(app, host, dashboard) {
     super(app);
     this.host = host;
@@ -39164,16 +40157,16 @@ var NewNoteModal = class extends import_obsidian4.Modal {
   }
   onOpen() {
     this.titleEl.setText("Create timeline note");
-    new import_obsidian4.Setting(this.contentEl).setName("Title").addText((text) => {
+    new import_obsidian7.Setting(this.contentEl).setName("Title").addText((text) => {
       text.setPlaceholder("Note title").onChange((value) => {
         this.title = value;
       });
       window.setTimeout(() => text.inputEl.focus(), 50);
     });
-    new import_obsidian4.Setting(this.contentEl).setName("Folder").setDesc("Leave blank for the vault root.").addText((text) => text.setPlaceholder("Notes").setValue(this.folder).onChange((value) => {
+    new import_obsidian7.Setting(this.contentEl).setName("Folder").setDesc("Leave blank for the vault root.").addText((text) => text.setPlaceholder("Notes").setValue(this.folder).onChange((value) => {
       this.folder = value;
     }));
-    new import_obsidian4.Setting(this.contentEl).addButton((button) => button.setButtonText("Create").setCta().onClick(() => this.create())).addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()));
+    new import_obsidian7.Setting(this.contentEl).addButton((button) => button.setButtonText("Create").setCta().onClick(() => this.create())).addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()));
   }
   onClose() {
     this.contentEl.empty();
@@ -39181,24 +40174,24 @@ var NewNoteModal = class extends import_obsidian4.Modal {
   async create() {
     const title = this.title.trim();
     if (!title || title.includes("/") || title.endsWith(".md")) {
-      new import_obsidian4.Notice("Enter a note title without slashes or the .md extension.");
+      new import_obsidian7.Notice("Enter a note title without slashes or the .md extension.");
       return;
     }
     try {
       const file = await this.host.createDashboardNote(
         title,
-        (0, import_obsidian4.normalizePath)(this.folder.trim()),
+        (0, import_obsidian7.normalizePath)(this.folder.trim()),
         this.dashboard
       );
       this.close();
       openValuePicker(this.host, file, this.dashboard);
     } catch (error) {
       console.error("Property Logs: failed to create note", error);
-      new import_obsidian4.Notice(error instanceof Error ? error.message : "Property Logs could not create the note.");
+      new import_obsidian7.Notice(error instanceof Error ? error.message : "Property Logs could not create the note.");
     }
   }
 };
-var AddTopicModal = class extends import_obsidian4.Modal {
+var AddTopicModal = class extends import_obsidian7.Modal {
   constructor(app, host, dashboard) {
     super(app);
     this.host = host;
@@ -39210,11 +40203,11 @@ var AddTopicModal = class extends import_obsidian4.Modal {
       text: `Add a note to ${this.dashboard.name}. Its scope rules still determine whether it appears.`,
       cls: "setting-item-description"
     });
-    new import_obsidian4.Setting(this.contentEl).setName("Pick existing note").setDesc("Search notes that match this dashboard's scope.").addButton((button) => button.setButtonText("Choose note").setCta().onClick(() => {
+    new import_obsidian7.Setting(this.contentEl).setName("Pick existing note").setDesc("Search notes that match this dashboard's scope.").addButton((button) => button.setButtonText("Choose note").setCta().onClick(() => {
       this.close();
       new ExistingNoteModal(this.app, this.host, this.dashboard).open();
     }));
-    new import_obsidian4.Setting(this.contentEl).setName("New note").setDesc("Create a Markdown file, then choose its initial value.").addButton((button) => button.setButtonText("Create note").onClick(() => {
+    new import_obsidian7.Setting(this.contentEl).setName("New note").setDesc("Create a Markdown file, then choose its initial value.").addButton((button) => button.setButtonText("Create note").onClick(() => {
       this.close();
       new NewNoteModal(this.app, this.host, this.dashboard).open();
     }));
@@ -39224,8 +40217,145 @@ var AddTopicModal = class extends import_obsidian4.Modal {
   }
 };
 
-// view/TimelineView.ts
-var TIMELINE_VIEW_TYPE = "property-logs-timeline";
+// view/PeriodAxis.ts
+var PeriodAxis = class {
+  constructor(axisEl, dividersEl, options) {
+    this.axisEl = axisEl;
+    this.options = options;
+    this.frame = null;
+    this.timer = null;
+    this.lastDrawAt = 0;
+    this.pending = null;
+    this.focus = null;
+    this.rowsEl = axisEl.createDiv({ cls: "property-logs-axis-rows" });
+    this.dividersEl = dividersEl;
+  }
+  setOptions(options) {
+    this.options = { ...this.options, ...options };
+  }
+  /** Marks the embedded note's own period so it reads as the anchor of the view. */
+  setFocus(range) {
+    this.focus = range;
+  }
+  scheduleUpdate(visible, offsetLeft, width, immediate = false) {
+    this.pending = { visible, offsetLeft, width };
+    if (immediate) {
+      if (this.timer !== null) window.clearTimeout(this.timer);
+      this.timer = null;
+      if (this.frame !== null) window.cancelAnimationFrame(this.frame);
+      this.frame = window.requestAnimationFrame(() => this.flush());
+      return;
+    }
+    if (this.frame !== null || this.timer !== null) return;
+    const delay = Math.max(0, 80 - (performance.now() - this.lastDrawAt));
+    if (delay > 0) {
+      this.timer = window.setTimeout(() => {
+        this.timer = null;
+        this.frame = window.requestAnimationFrame(() => this.flush());
+      }, delay);
+    } else {
+      this.frame = window.requestAnimationFrame(() => this.flush());
+    }
+  }
+  flush() {
+    this.frame = null;
+    const pending = this.pending;
+    this.pending = null;
+    if (!pending) return;
+    this.lastDrawAt = performance.now();
+    this.update(pending.visible, pending.offsetLeft, pending.width);
+  }
+  update(visible, offsetLeft, width) {
+    this.axisEl.style.setProperty("--property-logs-axis-offset", `${offsetLeft}px`);
+    this.dividersEl.style.setProperty("--property-logs-axis-offset", `${offsetLeft}px`);
+    this.rowsEl.empty();
+    this.dividersEl.empty();
+    if (width <= 0) return;
+    const span = visible.end.getTime() - visible.start.getTime();
+    if (span <= 0) return;
+    const x = (date2) => (date2.getTime() - visible.start.getTime()) / span * width;
+    const [fine, coarse] = axisGranularities(span);
+    const today = /* @__PURE__ */ new Date();
+    this.drawRow(coarse, visible, x, width, today, "coarse");
+    this.drawRow(fine, visible, x, width, today, "fine");
+    this.drawDividers(fine, coarse, visible, x, width);
+  }
+  drawRow(granularity, visible, x, width, today, variant) {
+    const row = this.rowsEl.createDiv({
+      cls: `property-logs-axis-row property-logs-axis-row-${variant}`
+    });
+    const openable = this.options.openable.has(granularity);
+    const todayRange = periodRange(granularity, today, this.options.weekStartsOn);
+    for (const start of periodBoundaries(granularity, visible, this.options.weekStartsOn)) {
+      const end = nextPeriodStart(granularity, start, this.options.weekStartsOn);
+      if (end.getTime() <= visible.start.getTime()) continue;
+      if (start.getTime() >= visible.end.getTime()) break;
+      const left = Math.max(x(start), 0);
+      const right = Math.min(x(end), width);
+      const cellWidth = right - left;
+      if (cellWidth < 6) continue;
+      const cell = row.createEl(openable ? "button" : "div", {
+        cls: "property-logs-axis-cell",
+        attr: openable ? { type: "button", title: `Open ${periodTitle(granularity, start)}` } : { title: periodTitle(granularity, start) }
+      });
+      cell.style.left = `${left}px`;
+      cell.style.width = `${cellWidth}px`;
+      cell.toggleClass("is-today", start.getTime() === todayRange.start.getTime());
+      cell.toggleClass(
+        "is-focus",
+        this.focus !== null && start.getTime() < this.focus.end.getTime() && end.getTime() > this.focus.start.getTime()
+      );
+      if (cellWidth >= 22) {
+        cell.createSpan({ text: periodLabel(granularity, start) });
+      }
+      if (openable) {
+        cell.addEventListener("click", (event2) => {
+          event2.preventDefault();
+          event2.stopPropagation();
+          this.options.onOpenPeriod(granularity, start);
+        });
+      }
+    }
+  }
+  drawDividers(fine, coarse, visible, x, width) {
+    const coarseStarts = new Set(
+      periodBoundaries(coarse, visible, this.options.weekStartsOn).map((date2) => date2.getTime())
+    );
+    const fineStarts = periodBoundaries(fine, visible, this.options.weekStartsOn);
+    const minimumGap = width / 90;
+    let lastX = Number.NEGATIVE_INFINITY;
+    for (const start of fineStarts) {
+      const position = x(start);
+      if (position < 0 || position > width) continue;
+      const strong = coarseStarts.has(start.getTime());
+      if (!strong && position - lastX < minimumGap) continue;
+      lastX = position;
+      const divider = this.dividersEl.createDiv({
+        cls: strong ? "property-logs-axis-divider is-strong" : "property-logs-axis-divider"
+      });
+      divider.style.left = `${position}px`;
+    }
+    if (this.focus) {
+      const left = Math.max(x(this.focus.start), 0);
+      const right = Math.min(x(this.focus.end), width);
+      if (right > left) {
+        const band = this.dividersEl.createDiv({ cls: "property-logs-axis-focus-band" });
+        band.style.left = `${left}px`;
+        band.style.width = `${right - left}px`;
+      }
+    }
+  }
+  destroy() {
+    if (this.frame !== null) window.cancelAnimationFrame(this.frame);
+    if (this.timer !== null) window.clearTimeout(this.timer);
+    this.frame = null;
+    this.timer = null;
+    this.pending = null;
+  }
+};
+
+// view/DashboardTimeline.ts
+var DAY_MS4 = 1e3 * 60 * 60 * 24;
 function localDate(date2) {
   const year = date2.getFullYear();
   const month = String(date2.getMonth() + 1).padStart(2, "0");
@@ -39296,46 +40426,38 @@ function addOneDay(date2) {
   next.setDate(next.getDate() + 1);
   return next;
 }
-var TimelineDashboardView = class extends import_obsidian5.ItemView {
-  constructor(leaf, host) {
-    super(leaf);
+function centerOf(range) {
+  return new Date((range.start.getTime() + range.end.getTime()) / 2);
+}
+var DashboardTimeline = class {
+  constructor(app, host, containerEl, options = {}) {
+    this.app = app;
     this.host = host;
-    this.dashboardId = "";
+    this.containerEl = containerEl;
+    this.options = options;
     this.timeline = null;
+    this.axis = null;
+    this.resizeObserver = null;
     this.renderToken = 0;
     this.refreshTimer = null;
+    this.dashboardId = "";
+    this.focus = null;
+    this.openableGranularities = /* @__PURE__ */ new Set(["day"]);
     this.lastBlockActivation = null;
+    this.timelineEl = null;
+    this.dividersEl = null;
   }
-  getViewType() {
-    return TIMELINE_VIEW_TYPE;
+  setOptions(options) {
+    this.options = { ...this.options, ...options };
   }
-  getDisplayText() {
-    const dashboard = this.host.getDashboard(this.dashboardId);
-    return dashboard?.name ?? "Property Logs Timeline";
+  setDashboardId(id) {
+    this.dashboardId = id;
   }
-  getIcon() {
-    return "chart-gantt";
+  getDashboardId() {
+    return this.dashboardId;
   }
-  getState() {
-    return { dashboardId: this.dashboardId };
-  }
-  async setState(state, result) {
-    await super.setState(state, result);
-    if (state && typeof state === "object" && !Array.isArray(state)) {
-      const id = state.dashboardId;
-      if (typeof id === "string") this.dashboardId = id;
-    }
-    await this.render();
-  }
-  async onOpen() {
-    if (!this.dashboardId) this.dashboardId = this.host.getDashboards()[0]?.id ?? "";
-    await this.render();
-  }
-  async onClose() {
-    this.renderToken++;
-    if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
-    this.destroyTimeline();
-    this.contentEl.empty();
+  setFocus(focus) {
+    this.focus = focus;
   }
   refresh() {
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
@@ -39344,52 +40466,74 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
       void this.render();
     }, 100);
   }
+  destroy() {
+    this.renderToken++;
+    if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
+    this.refreshTimer = null;
+    this.destroyTimeline();
+    this.containerEl.empty();
+  }
   destroyTimeline() {
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.axis?.destroy();
+    this.axis = null;
     this.timeline?.destroy();
     this.timeline = null;
+    this.timelineEl = null;
+    this.dividersEl = null;
   }
   async render() {
     const token = ++this.renderToken;
     this.destroyTimeline();
-    this.contentEl.empty();
-    this.contentEl.addClass("property-logs-timeline-view");
+    this.containerEl.empty();
+    this.containerEl.addClass("property-logs-dashboard");
+    this.containerEl.toggleClass("is-compact", this.options.compact === true);
+    this.containerEl.toggleClass("is-mobile-layout", import_obsidian8.Platform.isMobile);
     const dashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
     if (!dashboard) {
       this.renderNoDashboard();
       return;
     }
     this.dashboardId = dashboard.id;
-    const toolbar = this.contentEl.createDiv({ cls: "property-logs-toolbar" });
-    const loading = this.contentEl.createDiv({ cls: "property-logs-loading" });
-    loading.createDiv({ cls: "property-logs-loading-line" });
-    loading.createDiv({ cls: "property-logs-loading-line" });
-    loading.createDiv({ cls: "property-logs-loading-line" });
+    const header = this.containerEl.createDiv({ cls: "property-logs-toolbar" });
+    const loading = this.containerEl.createDiv({ cls: "property-logs-loading" });
+    for (let line = 0; line < 3; line++) loading.createDiv({ cls: "property-logs-loading-line" });
     loading.setAttribute("role", "status");
     loading.setAttribute("aria-label", "Loading timeline");
     await new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
     if (token !== this.renderToken) return;
-    const rows = this.buildRows(dashboard);
-    const properties = this.collectProperties(rows, dashboard);
-    this.renderToolbar(toolbar, dashboard, properties);
+    const files = this.host.getDashboardFiles(dashboard);
+    const rows = this.buildRows(dashboard, files);
+    const visible = this.resolveWindow();
+    if (this.options.showToolbar === false) header.remove();
+    else if (this.options.compact) this.renderCompactHeader(header, dashboard);
+    else this.renderToolbar(header, dashboard, this.collectProperties(rows, dashboard, files));
     loading.remove();
-    if (rows.length === 0) {
+    if (rows.length === 0 && !dashboard.showJournalNotes) {
       this.renderEmptyState(dashboard);
       return;
     }
     try {
-      this.renderTimeline(rows, dashboard);
+      const rendered = this.renderTimeline(rows, dashboard, visible);
+      void this.addJournalNotesAfterInitialDraw(token, dashboard, visible, rendered);
     } catch (error) {
       console.error("Property Logs could not render the timeline", error);
       this.renderTimelineError(error);
     }
+    void this.refreshOpenableGranularities();
   }
-  buildRows(dashboard) {
+  // ─── Data ──────────────────────────────────────────────────────────────────
+  buildRows(dashboard, files) {
     if (!dashboard.trackedPropertyKey.trim()) return [];
     const today = /* @__PURE__ */ new Date();
     const trackedHistoryKey = this.host.resolveHistoryKey(dashboard.trackedPropertyKey);
     const dateKey = this.host.getDashboardDateKey();
     const historyKey = this.host.getDashboardHistoryKey();
-    return this.host.getDashboardFiles(dashboard).flatMap((file) => {
+    const globalStyles = this.host.getGlobalValueStyles();
+    const globalLevels = globalLevelMapping(globalStyles);
+    const valueColors = resolveValueColors(globalStyles, dashboard.valueColors);
+    return files.flatMap((file) => {
       const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
       const metadata = frontmatter ?? {};
       const history = collectCompatibleHistory(metadata, historyKey, dateKey);
@@ -39400,12 +40544,14 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
         creationDate: file.stat.ctime,
         today,
         levelMapping: dashboard.levelMapping,
+        globalLevelMapping: globalLevels,
         defaultLevelForUnset: dashboard.defaultLevelForUnset,
         unmappedValueLevel: dashboard.unmappedValueLevel,
         colorMode: dashboard.colorMode,
         levelColors: dashboard.levelColors,
         colorPropertyValue: metadata[dashboard.colorProperty],
-        colorPropertyMap: dashboard.colorPropertyMap
+        colorPropertyMap: dashboard.colorPropertyMap,
+        valueColors
       });
       if (parsed.segments.length === 0 && !parsed.malformed) return [];
       return [{
@@ -39418,28 +40564,112 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
       }];
     });
   }
-  collectProperties(rows, dashboard) {
+  collectProperties(rows, dashboard, files) {
     const properties = new Set([
       dashboard.trackedPropertyKey,
       dashboard.colorProperty,
       ...dashboard.rowProperties
     ].filter(Boolean));
     rows.forEach((row) => Object.keys(row.frontmatter).forEach((key) => properties.add(key)));
-    this.host.getDashboardFiles(dashboard).forEach((file) => {
+    files.forEach((file) => {
       const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
       if (frontmatter) Object.keys(frontmatter).forEach((key) => properties.add(key));
     });
     return Array.from(properties).sort(compareText);
+  }
+  async collectJournalNotes(dashboard, visible) {
+    if (!dashboard.showJournalNotes) return [];
+    if (this.host.getJournalMarkers().length === 0) return [];
+    const padding = (visible.end.getTime() - visible.start.getTime()) * 2;
+    try {
+      return await this.host.getJournalNoteIndex().collect({
+        start: new Date(visible.start.getTime() - padding),
+        end: new Date(visible.end.getTime() + padding)
+      });
+    } catch (error) {
+      console.error("Property Logs could not read periodic notes", error);
+      return [];
+    }
+  }
+  async addJournalNotesAfterInitialDraw(token, dashboard, visible, rendered) {
+    const notes = await this.collectJournalNotes(dashboard, visible);
+    if (token !== this.renderToken || this.timeline === null) return;
+    if (notes.length === 0) {
+      if (rendered.items.length === 0) {
+        this.destroyTimeline();
+        this.containerEl.querySelector(".property-logs-timeline-wrapper")?.remove();
+        this.renderEmptyState(dashboard);
+      }
+      return;
+    }
+    this.addJournalItems(
+      rendered.items,
+      rendered.journalItems,
+      rendered.groups,
+      notes,
+      dashboard,
+      rendered.noteGroupIds
+    );
+    this.timeline.setData({ items: rendered.items, groups: rendered.groups });
+    this.timeline.redraw();
+    this.updateAxis();
+  }
+  resolveWindow() {
+    if (this.focus) {
+      const days2 = this.options.windowDays ?? this.host.getPeriodWindowDays()[this.focus.granularity] ?? DEFAULT_PERIOD_WINDOW_DAYS[this.focus.granularity];
+      return windowForPeriod(this.focus.range, days2);
+    }
+    const days = this.options.windowDays ?? 90;
+    const now2 = Date.now();
+    return {
+      start: new Date(now2 - days * DAY_MS4 / 2),
+      end: new Date(now2 + days * DAY_MS4 / 2)
+    };
+  }
+  async refreshOpenableGranularities() {
+    const granularities = await this.host.getPeriodicNotes().availableGranularities();
+    this.openableGranularities = granularities;
+    this.axis?.setOptions({ openable: granularities });
+    this.updateAxis();
+  }
+  // ─── Header ────────────────────────────────────────────────────────────────
+  renderCompactHeader(header, dashboard) {
+    header.addClass("property-logs-toolbar-compact");
+    const title = header.createEl("button", {
+      cls: "property-logs-toolbar-title-button",
+      text: dashboard.name,
+      attr: { type: "button", title: `Open ${dashboard.name}` }
+    });
+    title.addEventListener("click", () => {
+      if (this.options.onOpenFullDashboard) this.options.onOpenFullDashboard(dashboard.id);
+      else void this.host.openDashboard(dashboard.id);
+    });
+    if (this.focus) {
+      header.createSpan({
+        cls: "property-logs-toolbar-period",
+        text: this.focus.label ?? periodTitle(this.focus.granularity, this.focus.range.start)
+      });
+    }
+    const controls = header.createDiv({ cls: "property-logs-timeline-controls" });
+    this.createIconButton(controls, "zoom-out", "Zoom out", () => {
+      this.timeline?.zoomOut(0.35, this.timelineAnimation());
+    });
+    this.createIconButton(
+      controls,
+      this.focus ? "crosshair" : "calendar-days",
+      this.focus ? "Recenter on this note" : "Center today",
+      () => this.centerOnFocus()
+    );
+    this.createIconButton(controls, "zoom-in", "Zoom in", () => {
+      this.timeline?.zoomIn(0.35, this.timelineAnimation());
+    });
   }
   renderToolbar(toolbar, dashboard, properties) {
     const dashboards = this.host.getDashboards();
     if (dashboards.length > 1) {
       const selector = toolbar.createEl("select", { cls: "dropdown property-logs-toolbar-select" });
       selector.setAttribute("aria-label", "Dashboard");
-      dashboards.forEach((item) => selector.createEl("option", {
-        text: item.name,
-        value: item.id
-      }));
+      dashboards.forEach((item) => selector.createEl("option", { text: item.name, value: item.id }));
       selector.value = dashboard.id;
       selector.addEventListener("change", () => {
         void this.host.openDashboard(selector.value);
@@ -39455,6 +40685,7 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
       ...properties.map((property) => [`property:${property}`, property])
     ], async (value) => {
       dashboard.groupBy = value;
+      dashboard.foldedGroups = [];
       await this.host.save();
       this.refresh();
     });
@@ -39475,7 +40706,7 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
         type: "button"
       }
     });
-    (0, import_obsidian5.setIcon)(direction, dashboard.sortAscending ? "arrow-up-narrow-wide" : "arrow-down-wide-narrow");
+    (0, import_obsidian8.setIcon)(direction, dashboard.sortAscending ? "arrow-up-narrow-wide" : "arrow-down-wide-narrow");
     direction.addEventListener("click", async () => {
       dashboard.sortAscending = !dashboard.sortAscending;
       await this.host.save();
@@ -39483,78 +40714,125 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
     });
     this.createModeSelect(toolbar, "Color by", dashboard.colorMode, [
       ["level", "Level"],
-      ["property", "Property"]
+      ["property", "Property"],
+      ["value", "Tracked value"]
     ], async (value) => {
-      dashboard.colorMode = value === "property" ? "property" : "level";
+      dashboard.colorMode = value === "property" || value === "value" ? value : "level";
       await this.host.save();
       this.refresh();
     });
-    this.renderTimelineControls(toolbar);
-    const add = toolbar.createEl("button", {
-      text: "Add note",
-      cls: "mod-cta property-logs-add-topic",
-      attr: { type: "button" }
-    });
-    add.addEventListener("click", () => new AddTopicModal(this.app, this.host, dashboard).open());
-  }
-  renderTimelineControls(toolbar) {
     const controls = toolbar.createDiv({ cls: "property-logs-timeline-controls" });
-    const zoomOut = controls.createEl("button", {
-      cls: "clickable-icon",
-      attr: { type: "button", "aria-label": "Zoom out", title: "Zoom out" }
-    });
-    (0, import_obsidian5.setIcon)(zoomOut, "zoom-out");
-    zoomOut.addEventListener("click", () => {
+    this.createIconButton(controls, "zoom-out", "Zoom out", () => {
       this.timeline?.zoomOut(0.35, this.timelineAnimation());
     });
     const today = controls.createEl("button", {
       cls: "property-logs-today-button",
       attr: { type: "button", "aria-label": "Center today", title: "Center today" }
     });
-    (0, import_obsidian5.setIcon)(today, "calendar-days");
+    (0, import_obsidian8.setIcon)(today, "calendar-days");
     today.createSpan({ text: "Today" });
-    today.addEventListener("click", () => this.centerToday());
-    const zoomIn = controls.createEl("button", {
-      cls: "clickable-icon",
-      attr: { type: "button", "aria-label": "Zoom in", title: "Zoom in" }
-    });
-    (0, import_obsidian5.setIcon)(zoomIn, "zoom-in");
-    zoomIn.addEventListener("click", () => {
+    today.addEventListener("click", () => this.centerOnFocus());
+    this.createIconButton(controls, "zoom-in", "Zoom in", () => {
       this.timeline?.zoomIn(0.35, this.timelineAnimation());
     });
+    const add = toolbar.createEl("button", {
+      text: "Add note",
+      cls: "mod-cta property-logs-add-topic",
+      attr: { type: "button" }
+    });
+    add.addEventListener("click", () => new AddTopicModal(this.app, this.host, dashboard).open());
+    this.createIconButton(toolbar, "more-horizontal", "More options", (event2) => {
+      this.showOverflowMenu(event2, dashboard);
+    });
+  }
+  showOverflowMenu(event2, dashboard) {
+    const menu = new import_obsidian8.Menu();
+    menu.addItem((item) => item.setTitle(dashboard.foldedGroups.length > 0 ? "Unfold all rows" : "Fold all rows").setIcon(dashboard.foldedGroups.length > 0 ? "unfold-vertical" : "fold-vertical").onClick(async () => {
+      dashboard.foldedGroups = dashboard.foldedGroups.length > 0 ? [] : this.allFoldableGroupIds();
+      await this.host.save();
+      this.refresh();
+    }));
+    menu.addItem((item) => item.setTitle(dashboard.showJournalNotes ? "Hide periodic-note notes" : "Show periodic-note notes").setIcon("sticky-note").onClick(async () => {
+      dashboard.showJournalNotes = !dashboard.showJournalNotes;
+      await this.host.save();
+      this.refresh();
+    }));
+    menu.addItem((item) => item.setTitle(dashboard.showPeriodAxis ? "Hide calendar axis" : "Show calendar axis").setIcon("calendar-range").onClick(async () => {
+      dashboard.showPeriodAxis = !dashboard.showPeriodAxis;
+      await this.host.save();
+      this.refresh();
+    }));
+    menu.addItem((item) => item.setTitle("Duplicate dashboard").setIcon("copy").onClick(async () => {
+      const copy = await this.host.duplicateDashboard(dashboard.id);
+      if (copy) await this.host.openDashboard(copy.id);
+    }));
+    menu.showAtMouseEvent(event2);
+  }
+  allFoldableGroupIds() {
+    if (!this.timeline) return [];
+    const ids = [];
+    this.containerEl.querySelectorAll("[data-foldable-group]").forEach((element) => {
+      const id = element.dataset.foldableGroup;
+      if (id) ids.push(id);
+    });
+    return ids;
+  }
+  createIconButton(parent, icon, label, onClick) {
+    const button = parent.createEl("button", {
+      cls: "clickable-icon",
+      attr: { type: "button", "aria-label": label, title: label }
+    });
+    (0, import_obsidian8.setIcon)(button, icon);
+    button.addEventListener("click", (event2) => onClick(event2));
+    return button;
+  }
+  createModeSelect(toolbar, label, value, options, onChange) {
+    const wrapper = toolbar.createEl("label", { cls: "property-logs-toolbar-field" });
+    wrapper.createSpan({ text: label });
+    const select = wrapper.createEl("select", { cls: "dropdown" });
+    options.forEach(([optionValue, text]) => select.createEl("option", { value: optionValue, text }));
+    select.value = value;
+    select.addEventListener("change", () => void onChange(select.value));
   }
   timelineAnimation() {
     return {
       animation: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? false : { duration: 180, easingFunction: "easeInOutQuad" }
     };
   }
-  centerToday(animate = true) {
+  centerOnFocus(animate = true) {
     if (!this.timeline) return;
     const visible = this.timeline.getWindow();
     const duration = visible.end.getTime() - visible.start.getTime();
-    const center = Date.now();
+    const center = this.focus ? centerOf(this.focus.range).getTime() : Date.now();
     this.timeline.setWindow(
       new Date(center - duration / 2),
       new Date(center + duration / 2),
       animate ? this.timelineAnimation() : { animation: false }
     );
   }
-  createModeSelect(toolbar, label, value, options, onChange) {
-    const wrapper = toolbar.createEl("label", { cls: "property-logs-toolbar-field" });
-    wrapper.createSpan({ text: label });
-    const select = wrapper.createEl("select", { cls: "dropdown" });
-    options.forEach(([optionValue, text]) => select.createEl("option", {
-      value: optionValue,
-      text
-    }));
-    select.value = value;
-    select.addEventListener("change", () => void onChange(select.value));
+  // ─── Timeline ──────────────────────────────────────────────────────────────
+  isFolded(dashboard, groupId) {
+    return dashboard.foldedGroups.includes(groupId);
   }
-  renderTimeline(rows, dashboard) {
-    const timelineEl = this.contentEl.createDiv({ cls: "property-logs-timeline" });
+  async toggleFold(dashboard, groupId) {
+    dashboard.foldedGroups = this.isFolded(dashboard, groupId) ? dashboard.foldedGroups.filter((id) => id !== groupId) : [...dashboard.foldedGroups, groupId];
+    await this.host.save();
+    this.refresh();
+  }
+  renderTimeline(rows, dashboard, visible) {
+    const wrapper = this.containerEl.createDiv({ cls: "property-logs-timeline-wrapper" });
+    const axisEl = wrapper.createDiv({ cls: "property-logs-axis" });
+    const timelineEl = wrapper.createDiv({ cls: "property-logs-timeline" });
+    const dividersEl = wrapper.createDiv({ cls: "property-logs-axis-dividers" });
+    this.timelineEl = timelineEl;
+    this.dividersEl = dividersEl;
+    axisEl.toggle(dashboard.showPeriodAxis);
+    dividersEl.toggle(dashboard.showPeriodAxis);
     const items = [];
     const groups = [];
     const itemRows = /* @__PURE__ */ new Map();
+    const journalItems = /* @__PURE__ */ new Map();
+    const noteGroupIds = /* @__PURE__ */ new Map();
     const sortedRows = [...rows].sort((first, second) => compareRows(first, second, dashboard));
     if (dashboard.groupBy === "status") {
       const statusBuckets = /* @__PURE__ */ new Map();
@@ -39572,18 +40850,21 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
           statusBuckets.set(status, bucket);
         });
       });
-      Array.from(statusBuckets.entries()).sort(
-        ([firstStatus, first], [secondStatus, second]) => first.level - second.level || compareText(firstStatus, secondStatus)
-      ).forEach(([status, bucket], order) => {
+      Array.from(statusBuckets.entries()).sort(([firstStatus, first], [secondStatus, second]) => first.level - second.level || compareText(firstStatus, secondStatus)).forEach(([status, bucket], order) => {
         const groupId = `status:${status}`;
+        const folded = this.isFolded(dashboard, groupId);
         groups.push({
           id: groupId,
-          content: this.createStatusLabel(status, bucket.notes.size),
-          className: "property-logs-status-group",
+          content: this.createGroupLabel(
+            dashboard,
+            groupId,
+            this.createStatusLabel(status, bucket.notes.size)
+          ),
+          className: folded ? "property-logs-status-group is-folded" : "property-logs-status-group",
           order
         });
         bucket.segments.forEach(({ row, segment, segmentIndex }) => {
-          this.addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId);
+          this.addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId, folded);
         });
       });
     } else {
@@ -39600,21 +40881,44 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
       }
       let order = 0;
       Array.from(buckets.entries()).sort(([first], [second]) => compareText(first, second)).forEach(([bucket, bucketRows]) => {
-        const childIds = [];
+        const parentId = `bucket:${bucket}`;
+        const folded = dashboard.groupBy !== "none" && this.isFolded(dashboard, parentId);
         if (dashboard.groupBy !== "none") {
-          const parentId = `bucket:${bucket}`;
-          bucketRows.forEach((row) => childIds.push(`note:${row.file.path}`));
+          const label = this.createGroupLabel(
+            dashboard,
+            parentId,
+            this.createBucketLabel(bucket, bucketRows.length)
+          );
           groups.push({
             id: parentId,
-            content: bucket,
-            nestedGroups: childIds,
-            showNested: true,
-            className: "property-logs-group-header",
+            content: label,
+            nestedGroups: folded ? void 0 : bucketRows.map((row) => `note:${row.file.path}`),
+            showNested: folded ? void 0 : true,
+            className: folded ? "property-logs-group-header is-folded" : "property-logs-group-header",
             order: order++
           });
         }
+        if (folded) {
+          bucketRows.forEach((row) => {
+            noteGroupIds.set(row.file.path, parentId);
+            row.parsed.segments.forEach((segment, segmentIndex) => {
+              this.addSegmentItem(
+                items,
+                itemRows,
+                row,
+                dashboard,
+                segment,
+                segmentIndex,
+                parentId,
+                true
+              );
+            });
+          });
+          return;
+        }
         bucketRows.forEach((row) => {
           const groupId = `note:${row.file.path}`;
+          noteGroupIds.set(row.file.path, groupId);
           groups.push({
             id: groupId,
             content: this.createRowLabel(row, dashboard),
@@ -39622,19 +40926,70 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
             order: order++
           });
           row.parsed.segments.forEach((segment, segmentIndex) => {
-            this.addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId);
+            this.addSegmentItem(
+              items,
+              itemRows,
+              row,
+              dashboard,
+              segment,
+              segmentIndex,
+              groupId,
+              false
+            );
           });
         });
       });
     }
-    const today = /* @__PURE__ */ new Date();
-    const initialWindowDuration = 1e3 * 60 * 60 * 24 * 90;
-    const windowStart = new Date(today.getTime() - initialWindowDuration / 2);
-    const windowEnd = new Date(today.getTime() + initialWindowDuration / 2);
+    const options = this.timelineOptions(visible, dashboard.showPeriodAxis);
+    this.timeline = new Timeline(timelineEl, items, groups, options);
+    this.timeline.on("click", (properties) => {
+      if (properties.item === null || properties.item === void 0) return;
+      const id = String(properties.item);
+      const journalNote = journalItems.get(id);
+      if (journalNote) {
+        this.activateJournalNote(journalNote, properties.event);
+        return;
+      }
+      const row = itemRows.get(id);
+      if (row) this.activateTimelineBlock(row, dashboard, properties.event);
+    });
+    this.timeline.on("contextmenu", (properties) => {
+      if (!this.isCtrlGesture(properties.event)) return;
+      properties.event.preventDefault();
+      if (properties.item === null || properties.item === void 0) return;
+      const row = itemRows.get(String(properties.item));
+      if (row) this.activateTimelineBlock(row, dashboard, properties.event);
+    });
+    if (dashboard.showPeriodAxis) {
+      this.axis = new PeriodAxis(axisEl, dividersEl, {
+        weekStartsOn: this.host.getWeekStartsOn(),
+        openable: this.openableGranularities,
+        onOpenPeriod: (granularity, date2) => {
+          void this.host.getPeriodicNotes().openPeriod(granularity, date2);
+        }
+      });
+      this.axis.setFocus(this.focus?.range ?? null);
+      this.timeline.on("rangechange", () => this.updateAxis());
+      this.timeline.on("rangechanged", () => this.updateAxis(true));
+      this.timeline.on("changed", () => this.updateAxis());
+    }
+    this.timeline.setWindow(visible.start, visible.end, { animation: false });
+    const initialTimeline = this.timeline;
+    window.requestAnimationFrame(() => {
+      if (this.timeline !== initialTimeline) return;
+      this.timeline.redraw();
+      this.timeline.setWindow(visible.start, visible.end, { animation: false });
+      this.updateAxis();
+    });
+    this.observeResize(wrapper, initialTimeline);
+    return { items, groups, journalItems, noteGroupIds };
+  }
+  timelineOptions(visible, showAxis) {
+    const compact = this.options.compact === true;
+    const interactive = !(compact && import_obsidian8.Platform.isMobile);
     const options = {
       autoResize: true,
       width: "100%",
-      height: "100%",
       editable: false,
       groupEditable: false,
       itemsAlwaysDraggable: false,
@@ -39646,53 +41001,153 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
       orientation: { axis: "top", item: "top" },
       showCurrentTime: true,
       showTooltips: false,
-      horizontalScroll: true,
+      // Our own calendar strip replaces vis-timeline's labels so day, week, and
+      // month cells can open the matching periodic note.
+      showMinorLabels: !showAxis,
+      showMajorLabels: !showAxis,
+      horizontalScroll: !compact && !import_obsidian8.Platform.isMobile,
       verticalScroll: true,
-      moveable: true,
-      zoomable: false,
+      moveable: interactive,
+      zoomable: import_obsidian8.Platform.isMobile && interactive,
       zoomMin: 1e3 * 60 * 60 * 24 * 7,
       zoomMax: 1e3 * 60 * 60 * 24 * 365 * 20,
-      margin: { item: { horizontal: 0, vertical: 4 }, axis: 8 },
-      groupOrder: (first, second) => (first.order ?? 0) - (second.order ?? 0)
+      margin: { item: { horizontal: 0, vertical: compact ? 2 : 4 }, axis: compact ? 4 : 8 },
+      groupOrder: (first, second) => (first.order ?? 0) - (second.order ?? 0),
+      start: visible.start,
+      end: visible.end
     };
-    this.timeline = new Timeline(timelineEl, items, groups, options);
-    this.timeline.on("click", (properties) => {
-      if (properties.item === null || properties.item === void 0) return;
-      const row = itemRows.get(String(properties.item));
-      if (row) this.activateTimelineBlock(row, dashboard, properties.event);
-    });
-    this.timeline.on("contextmenu", (properties) => {
-      if (!this.isCtrlGesture(properties.event)) return;
-      properties.event.preventDefault();
-      if (properties.item === null || properties.item === void 0) return;
-      const row = itemRows.get(String(properties.item));
-      if (row) this.activateTimelineBlock(row, dashboard, properties.event);
-    });
-    this.timeline.setWindow(windowStart, windowEnd, { animation: false });
-    const initialTimeline = this.timeline;
-    window.requestAnimationFrame(() => {
-      if (this.timeline !== initialTimeline) return;
-      this.timeline.redraw();
-      this.centerToday(false);
-    });
+    if (compact) options.maxHeight = this.options.maxHeight ?? 420;
+    else options.height = "100%";
+    return options;
   }
-  addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId) {
+  observeResize(wrapper, timeline) {
+    if (typeof ResizeObserver === "undefined") return;
+    this.resizeObserver = new ResizeObserver(() => {
+      if (this.timeline !== timeline) return;
+      this.updateAxis();
+    });
+    this.resizeObserver.observe(wrapper);
+  }
+  updateAxis(immediate = false) {
+    if (!this.timeline || !this.axis || !this.timelineEl) return;
+    const leftPanel = this.timelineEl.querySelector(".vis-panel.vis-left");
+    const centerPanel = this.timelineEl.querySelector(".vis-panel.vis-center");
+    const offset = leftPanel?.offsetWidth ?? 0;
+    const width = centerPanel?.offsetWidth ?? Math.max(this.timelineEl.clientWidth - offset, 0);
+    const visible = this.timeline.getWindow();
+    this.axis.scheduleUpdate(
+      { start: new Date(visible.start), end: new Date(visible.end) },
+      offset,
+      width,
+      immediate
+    );
+  }
+  addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId, folded) {
     const id = `${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`;
     const end = segment.end.getTime() <= segment.start.getTime() ? addOneDay(segment.start) : segment.end;
-    items.push({
+    const item = {
       id,
       group: groupId,
       start: segment.start,
       end,
       type: "range",
       align: "auto",
-      content: this.createSegmentContent(row, dashboard, segment),
+      content: this.createSegmentContent(row, dashboard, segment, folded),
       selectable: false,
       editable: false,
-      className: "property-logs-segment",
+      className: folded ? "property-logs-segment is-folded" : "property-logs-segment",
       style: timelineColorStyle(segment.color)
-    });
+    };
+    if (folded) item.subgroup = `${groupId}:folded`;
+    items.push(item);
     itemRows.set(id, row);
+  }
+  addJournalItems(items, journalItems, groups, notes, dashboard, noteGroupIds) {
+    if (notes.length === 0) return;
+    const markers = this.host.getJournalMarkers();
+    const laneId = "journal:lane";
+    let laneUsed = false;
+    notes.forEach((note) => {
+      const style = markerStyle(markers, note.marker);
+      const targetGroup = this.resolveJournalGroup(note, noteGroupIds);
+      const groupId = targetGroup ?? laneId;
+      if (!targetGroup) laneUsed = true;
+      const folded = this.isFolded(dashboard, groupId);
+      const item = {
+        id: note.id,
+        group: groupId,
+        start: centerOf(note.range),
+        type: "point",
+        content: this.createJournalContent(note, style),
+        selectable: false,
+        editable: false,
+        className: "property-logs-journal-note",
+        style: timelineColorStyle(style.color)
+      };
+      if (folded) item.subgroup = `${groupId}:folded`;
+      items.push(item);
+      journalItems.set(note.id, note);
+    });
+    if (laneUsed) {
+      const label = document.createElement("div");
+      label.className = "property-logs-journal-lane-label";
+      const icon = label.createSpan({ cls: "property-logs-journal-lane-icon" });
+      (0, import_obsidian8.setIcon)(icon, "sticky-note");
+      label.createSpan({ text: "Journal notes" });
+      groups.unshift({
+        id: laneId,
+        content: label,
+        className: "property-logs-journal-lane",
+        order: -1
+      });
+    }
+  }
+  resolveJournalGroup(note, noteGroupIds) {
+    for (const link of note.links) {
+      const target = this.app.metadataCache.getFirstLinkpathDest(link, note.file.path);
+      if (!target) continue;
+      const groupId = noteGroupIds.get(target.path);
+      if (groupId) return groupId;
+    }
+    return null;
+  }
+  createJournalContent(note, style) {
+    const content = document.createElement("button");
+    content.type = "button";
+    content.className = "property-logs-journal-button";
+    content.setAttribute("data-task", note.marker);
+    const text = plainNoteText(note.text);
+    content.title = `${style.label} \xB7 ${localDate(note.range.start)}
+${text}`;
+    content.setAttribute("aria-label", `${style.label}: ${text}`);
+    const icon = content.createSpan({ cls: "property-logs-journal-icon" });
+    (0, import_obsidian8.setIcon)(icon, style.icon);
+    content.createSpan({ text, cls: "property-logs-journal-text" });
+    content.addEventListener("click", (event2) => {
+      event2.stopPropagation();
+      this.activateJournalNote(note, event2);
+    });
+    return content;
+  }
+  activateJournalNote(note, event2) {
+    const now2 = Date.now();
+    const key = `journal:${note.id}`;
+    if (this.lastBlockActivation?.key === key && now2 - this.lastBlockActivation.at < 250) return;
+    this.lastBlockActivation = { key, at: now2 };
+    if (import_obsidian8.Platform.isMobile || this.isCtrlGesture(event2)) {
+      const source = event2.srcEvent ?? event2;
+      const menu = new import_obsidian8.Menu();
+      menu.addItem((item) => item.setTitle(plainNoteText(note.text)).setIcon("quote").setDisabled(true));
+      menu.addItem((item) => item.setTitle(`Open ${note.file.basename}`).setIcon("file-text").onClick(() => void this.openJournalSource(note)));
+      if (typeof source.clientX === "number") menu.showAtMouseEvent(source);
+      else menu.showAtPosition({ x: 0, y: 0 });
+      return;
+    }
+    void this.openJournalSource(note);
+  }
+  async openJournalSource(note) {
+    const leaf = this.app.workspace.getLeaf(false);
+    await leaf.openFile(note.file, { eState: { line: note.line } });
   }
   createStatusLabel(status, noteCount) {
     const label = document.createElement("div");
@@ -39705,10 +41160,41 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
     });
     return label;
   }
-  createSegmentContent(row, dashboard, segment) {
+  createBucketLabel(bucket, noteCount) {
+    const label = document.createElement("div");
+    label.className = "property-logs-status-label";
+    label.createSpan({ text: bucket || "All notes", cls: "property-logs-status-name" });
+    label.createSpan({ text: String(noteCount), cls: "property-logs-status-count" });
+    return label;
+  }
+  /** Wraps a group label with the fold toggle that collapses it into one row. */
+  createGroupLabel(dashboard, groupId, content) {
+    const folded = this.isFolded(dashboard, groupId);
+    const wrapper = document.createElement("div");
+    wrapper.className = folded ? "property-logs-group-label is-folded" : "property-logs-group-label";
+    wrapper.dataset.foldableGroup = groupId;
+    const toggle = wrapper.createEl("button", {
+      cls: "property-logs-fold-toggle",
+      attr: {
+        type: "button",
+        "aria-expanded": String(!folded),
+        "aria-label": folded ? "Unfold rows" : "Fold rows",
+        title: folded ? "Unfold rows" : "Fold into one row"
+      }
+    });
+    (0, import_obsidian8.setIcon)(toggle, folded ? "chevron-right" : "chevron-down");
+    toggle.addEventListener("click", (event2) => {
+      event2.preventDefault();
+      event2.stopPropagation();
+      void this.toggleFold(dashboard, groupId);
+    });
+    wrapper.appendChild(content);
+    return wrapper;
+  }
+  createSegmentContent(row, dashboard, segment, folded) {
     const content = document.createElement("button");
     content.type = "button";
-    content.className = "property-logs-segment-button";
+    content.className = folded ? "property-logs-segment-button is-folded" : "property-logs-segment-button";
     const primaryAction = dashboard.noteOpenGesture === "click" ? "Click to open note; Ctrl-click to change value." : "Click to change value; Ctrl-click to open note.";
     content.title = `${row.file.basename} \u2014 ${segment.value ?? "Unset"} \u2014 ${localDate(segment.start)} to ${localDate(segment.end)}. ${primaryAction}`;
     content.setAttribute(
@@ -39716,12 +41202,14 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
       `${row.file.basename}: ${segment.value ?? "unset"}, level ${segment.level}. ${primaryAction}`
     );
     content.createSpan({ text: row.file.basename, cls: "property-logs-segment-title" });
-    dashboard.rowProperties.forEach((key) => {
-      const value = displayPropertyValue(
-        Object.prototype.hasOwnProperty.call(row.frontmatter, key) ? row.frontmatter[key] : latestHistoryValue(row.history, key, this.host.getDashboardDateKey())
-      );
-      if (value) content.createSpan({ text: value, cls: "property-logs-segment-meta" });
-    });
+    if (!folded) {
+      dashboard.rowProperties.forEach((key) => {
+        const value = displayPropertyValue(
+          Object.prototype.hasOwnProperty.call(row.frontmatter, key) ? row.frontmatter[key] : latestHistoryValue(row.history, key, this.host.getDashboardDateKey())
+        );
+        if (value) content.createSpan({ text: value, cls: "property-logs-segment-meta" });
+      });
+    }
     content.addEventListener("click", (event2) => {
       event2.stopPropagation();
       this.activateTimelineBlock(row, dashboard, event2);
@@ -39764,11 +41252,7 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
     const metadata = label.createDiv({ cls: "property-logs-row-metadata" });
     dashboard.rowProperties.forEach((key) => {
       const value = displayPropertyValue(
-        Object.prototype.hasOwnProperty.call(row.frontmatter, key) ? row.frontmatter[key] : latestHistoryValue(
-          row.history,
-          key,
-          this.host.getDashboardDateKey()
-        )
+        Object.prototype.hasOwnProperty.call(row.frontmatter, key) ? row.frontmatter[key] : latestHistoryValue(row.history, key, this.host.getDashboardDateKey())
       );
       if (!value) return;
       metadata.createSpan({ text: `${key}: ${value}` });
@@ -39777,33 +41261,206 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
       const warning = label.createSpan({ cls: "property-logs-row-warning" });
       warning.setAttribute("aria-label", "Timeline data warning");
       warning.setAttribute("title", row.parsed.issues.map((issue) => issue.message).join("\n"));
-      (0, import_obsidian5.setIcon)(warning, "triangle-alert");
+      (0, import_obsidian8.setIcon)(warning, "triangle-alert");
     }
     return label;
   }
   renderNoDashboard() {
-    const empty = this.contentEl.createDiv({ cls: "property-logs-empty-state" });
+    const empty = this.containerEl.createDiv({ cls: "property-logs-empty-state" });
     empty.createEl("h3", { text: "No timeline dashboard yet" });
-    empty.createEl("p", { text: "Create one in Property Logs settings to start visualizing property history." });
+    empty.createEl("p", {
+      text: "Create one in Property Logs settings to start visualizing property history."
+    });
   }
   renderTimelineError(error) {
-    this.contentEl.querySelector(".property-logs-timeline")?.remove();
-    const empty = this.contentEl.createDiv({ cls: "property-logs-empty-state property-logs-error-state" });
+    this.containerEl.querySelector(".property-logs-timeline-wrapper")?.remove();
+    const empty = this.containerEl.createDiv({
+      cls: "property-logs-empty-state property-logs-error-state"
+    });
     empty.createEl("h3", { text: "The timeline could not be displayed" });
     empty.createEl("p", {
       text: error instanceof Error ? error.message : "Reload Property Logs and try opening this dashboard again."
     });
   }
   renderEmptyState(dashboard) {
-    const empty = this.contentEl.createDiv({ cls: "property-logs-empty-state" });
+    const empty = this.containerEl.createDiv({ cls: "property-logs-empty-state" });
     empty.createEl("h3", { text: "No visible notes" });
     empty.createEl("p", {
       text: dashboard.trackedPropertyKey.trim() ? "Add a note or adjust this dashboard's scope and level mappings." : "Choose a tracked frontmatter property in this dashboard's settings."
     });
-    if (dashboard.trackedPropertyKey.trim()) {
+    if (dashboard.trackedPropertyKey.trim() && !this.options.compact) {
       const button = empty.createEl("button", { text: "Add note", cls: "mod-cta" });
       button.addEventListener("click", () => new AddTopicModal(this.app, this.host, dashboard).open());
     }
+  }
+};
+
+// view/DashboardEmbed.ts
+var DashboardEmbed = class extends import_obsidian9.MarkdownRenderChild {
+  constructor(app, host, containerEl, source, sourcePath) {
+    super(containerEl);
+    this.app = app;
+    this.host = host;
+    this.source = source;
+    this.sourcePath = sourcePath;
+    this.timeline = null;
+    this.resizeObserver = null;
+    this.rendered = false;
+  }
+  async onload() {
+    this.containerEl.addClass("property-logs-embed");
+    if (this.containerEl.clientWidth > 0) await this.renderEmbed();
+    else this.renderPlaceholder();
+    this.observeSize();
+  }
+  onunload() {
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.timeline?.destroy();
+    this.timeline = null;
+  }
+  refresh() {
+    if (this.rendered) this.timeline?.refresh();
+  }
+  observeSize() {
+    if (typeof ResizeObserver === "undefined") return;
+    this.resizeObserver = new ResizeObserver(() => {
+      if (this.rendered || this.containerEl.clientWidth <= 0) return;
+      void this.renderEmbed();
+    });
+    this.resizeObserver.observe(this.containerEl);
+  }
+  renderPlaceholder() {
+    this.containerEl.empty();
+    const placeholder = this.containerEl.createDiv({ cls: "property-logs-loading" });
+    for (let line = 0; line < 2; line++) {
+      placeholder.createDiv({ cls: "property-logs-loading-line" });
+    }
+  }
+  async renderEmbed() {
+    this.rendered = true;
+    const options = parseEmbedOptions(this.source);
+    this.containerEl.empty();
+    const dashboards = this.host.getDashboards();
+    if (dashboards.length === 0) {
+      this.renderMessage("Create a dashboard in Property Logs settings first.");
+      return;
+    }
+    const needle = options.dashboard.trim().toLowerCase();
+    const dashboard = needle ? dashboards.find((item) => item.id.toLowerCase() === needle) ?? dashboards.find((item) => item.name.toLowerCase() === needle) : dashboards[0];
+    if (!dashboard) {
+      this.renderMessage(`No dashboard named "${options.dashboard}".`);
+      return;
+    }
+    if (options.errors.length > 0) {
+      const warning = this.containerEl.createDiv({ cls: "property-logs-embed-warning" });
+      options.errors.forEach((error) => warning.createDiv({ text: error }));
+    }
+    const context = await this.resolveContext(options.date, options.period);
+    const timelineEl = this.containerEl.createDiv({ cls: "property-logs-embed-body" });
+    this.timeline = new DashboardTimeline(this.app, this.host, timelineEl, {
+      compact: true,
+      showToolbar: options.header,
+      maxHeight: options.height,
+      windowDays: options.windowDays
+    });
+    this.timeline.setDashboardId(dashboard.id);
+    this.timeline.setFocus(context ? {
+      granularity: context.granularity,
+      range: context.range,
+      label: periodTitle(context.granularity, context.range.start)
+    } : null);
+    await this.timeline.render();
+  }
+  async resolveContext(explicitDate, explicitPeriod) {
+    const periodic = this.host.getPeriodicNotes();
+    const weekStartsOn = this.host.getWeekStartsOn();
+    if (explicitDate) {
+      const granularity = explicitPeriod ?? "day";
+      return {
+        granularity,
+        date: explicitDate,
+        range: periodRange(granularity, explicitDate, weekStartsOn),
+        source: "frontmatter"
+      };
+    }
+    const file = this.app.vault.getAbstractFileByPath(this.sourcePath);
+    if (!(file instanceof import_obsidian9.TFile)) return null;
+    const context = await periodic.contextForFile(file);
+    if (!context) return null;
+    if (!explicitPeriod || explicitPeriod === context.granularity) return context;
+    return {
+      ...context,
+      granularity: explicitPeriod,
+      range: periodRange(explicitPeriod, context.date, weekStartsOn)
+    };
+  }
+  renderMessage(text) {
+    this.containerEl.createDiv({ cls: "property-logs-embed-warning", text });
+  }
+};
+var EMBED_CODE_BLOCK = "property-logs";
+function createEmbedProcessor(app, host, register) {
+  return (source, element, context) => {
+    const embed = new DashboardEmbed(app, host, element, source, context.sourcePath);
+    register(embed);
+    context.addChild(embed);
+  };
+}
+
+// view/TimelineView.ts
+var import_obsidian10 = require("obsidian");
+var TIMELINE_VIEW_TYPE = "property-logs-timeline";
+var TimelineDashboardView = class extends import_obsidian10.ItemView {
+  constructor(leaf, host) {
+    super(leaf);
+    this.host = host;
+    this.dashboardId = "";
+    this.timeline = null;
+  }
+  getViewType() {
+    return TIMELINE_VIEW_TYPE;
+  }
+  getDisplayText() {
+    const dashboard = this.host.getDashboard(this.dashboardId);
+    return dashboard?.name ?? "Property Logs Timeline";
+  }
+  getIcon() {
+    return "chart-gantt";
+  }
+  getState() {
+    return { dashboardId: this.dashboardId };
+  }
+  async setState(state, result) {
+    await super.setState(state, result);
+    if (state && typeof state === "object" && !Array.isArray(state)) {
+      const id = state.dashboardId;
+      if (typeof id === "string") this.dashboardId = id;
+    }
+    await this.renderDashboard();
+  }
+  async onOpen() {
+    if (!this.dashboardId) this.dashboardId = this.host.getDashboards()[0]?.id ?? "";
+    await this.renderDashboard();
+  }
+  async onClose() {
+    this.timeline?.destroy();
+    this.timeline = null;
+    this.contentEl.empty();
+  }
+  refresh() {
+    this.timeline?.refresh();
+  }
+  async renderDashboard() {
+    this.contentEl.addClass("property-logs-timeline-view");
+    if (!this.timeline) {
+      this.timeline = new DashboardTimeline(this.app, this.host, this.contentEl, {
+        showToolbar: true,
+        compact: false
+      });
+    }
+    this.timeline.setDashboardId(this.dashboardId);
+    await this.timeline.render();
   }
 };
 
@@ -39834,19 +41491,38 @@ var DEFAULT_SETTINGS = {
     heading: "",
     groups: []
   },
-  dashboards: []
+  dashboards: [],
+  globalValueStyles: {},
+  journalMarkers: DEFAULT_JOURNAL_MARKERS.map((marker) => ({ ...marker })),
+  weekStartsOn: 1,
+  periodWindowDays: { ...DEFAULT_PERIOD_WINDOW_DAYS }
 };
-var PropertyLogsPlugin = class extends import_obsidian6.Plugin {
+var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
   constructor() {
     super(...arguments);
     this.previousStatuses = /* @__PURE__ */ new Map();
     this.previousPropertyValues = /* @__PURE__ */ new Map();
+    this.embeds = /* @__PURE__ */ new Set();
+    this.dashboardRefreshTimer = null;
     this.settings = { ...DEFAULT_SETTINGS };
   }
   async onload() {
     console.log("Property Logs Plugin loaded");
     await this.load_();
+    this.periodicNotes = new PeriodicNotes(this.app, () => this.periodicNotesConfig());
+    this.journalNoteIndex = new JournalNoteIndex(
+      this.app,
+      this.periodicNotes,
+      () => this.settings.journalMarkers
+    );
     this.registerView(TIMELINE_VIEW_TYPE, (leaf) => new TimelineDashboardView(leaf, this));
+    this.registerMarkdownCodeBlockProcessor(
+      EMBED_CODE_BLOCK,
+      createEmbedProcessor(this.app, this, (embed) => {
+        this.embeds.add(embed);
+        embed.register(() => this.embeds.delete(embed));
+      })
+    );
     this.addSettingTab(new StatusHistorySettingTab(this.app, this));
     this.addRibbonIcon("chart-gantt", "Open Property Logs dashboard", () => {
       this.openDashboardPicker();
@@ -39855,6 +41531,46 @@ var PropertyLogsPlugin = class extends import_obsidian6.Plugin {
       id: "open-property-logs-dashboard",
       name: "Open timeline dashboard",
       callback: () => this.openDashboardPicker()
+    });
+    this.addCommand({
+      id: "insert-dashboard-embed",
+      name: "Insert dashboard embed",
+      editorCallback: (editor) => {
+        const dashboard = this.settings.dashboards[0];
+        if (!dashboard) {
+          new import_obsidian11.Notice("Create a dashboard in Property Logs settings first.");
+          return;
+        }
+        editor.replaceRange(
+          [
+            "```" + EMBED_CODE_BLOCK,
+            `dashboard: ${dashboard.name}`,
+            "date: auto",
+            "zoom: auto",
+            "```",
+            ""
+          ].join("\n"),
+          editor.getCursor()
+        );
+      }
+    });
+    this.addCommand({
+      id: "duplicate-dashboard",
+      name: "Duplicate dashboard",
+      callback: () => {
+        if (this.settings.dashboards.length === 0) {
+          new import_obsidian11.Notice("Create a dashboard in Property Logs settings first.");
+          return;
+        }
+        new DashboardPickerModal(this.app, {
+          app: this.app,
+          getDashboards: () => this.getDashboards(),
+          openDashboard: async (id) => {
+            const copy = await this.duplicateDashboard(id);
+            if (copy) await this.openDashboard(copy.id);
+          }
+        }, "Duplicate Property Logs dashboard").open();
+      }
     });
     this.addCommand({
       id: "insert-status-chart",
@@ -39879,12 +41595,24 @@ var PropertyLogsPlugin = class extends import_obsidian6.Plugin {
     this.registerEvent(
       this.app.metadataCache.on("changed", (file) => {
         void this.handleMetadataChange(file);
+        this.journalNoteIndex.invalidate(file.path);
         this.refreshDashboardViews();
       })
     );
     this.registerEvent(this.app.vault.on("create", () => this.refreshDashboardViews()));
-    this.registerEvent(this.app.vault.on("delete", () => this.refreshDashboardViews()));
-    this.registerEvent(this.app.vault.on("rename", () => this.refreshDashboardViews()));
+    this.registerEvent(this.app.vault.on("delete", (file) => {
+      this.journalNoteIndex.invalidate(file.path);
+      this.refreshDashboardViews();
+    }));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      this.journalNoteIndex.invalidate(oldPath);
+      this.journalNoteIndex.invalidate(file.path);
+      this.refreshDashboardViews();
+    }));
+    this.registerEvent(this.app.vault.on("modify", (file) => {
+      this.journalNoteIndex.invalidate(file.path);
+      this.refreshDashboardViews();
+    }));
   }
   getDashboards() {
     return this.settings.dashboards;
@@ -39932,7 +41660,7 @@ var PropertyLogsPlugin = class extends import_obsidian6.Plugin {
     return historyContainsKey(history, trackedHistoryKey);
   }
   async createDashboardNote(title, folder, dashboard) {
-    const normalizedFolder = (0, import_obsidian6.normalizePath)(folder).replace(/^\/+|\/+$/g, "");
+    const normalizedFolder = (0, import_obsidian11.normalizePath)(folder).replace(/^\/+|\/+$/g, "");
     if (normalizedFolder) {
       const segments = normalizedFolder.split("/");
       let current = "";
@@ -39943,7 +41671,7 @@ var PropertyLogsPlugin = class extends import_obsidian6.Plugin {
         }
       }
     }
-    const path2 = (0, import_obsidian6.normalizePath)(normalizedFolder ? `${normalizedFolder}/${title}.md` : `${title}.md`);
+    const path2 = (0, import_obsidian11.normalizePath)(normalizedFolder ? `${normalizedFolder}/${title}.md` : `${title}.md`);
     if (this.app.vault.getAbstractFileByPath(path2)) {
       throw new Error(`A note already exists at ${path2}.`);
     }
@@ -39967,7 +41695,7 @@ var PropertyLogsPlugin = class extends import_obsidian6.Plugin {
   async openDashboard(id) {
     const dashboard = this.getDashboard(id);
     if (!dashboard) {
-      new import_obsidian6.Notice("Property Logs dashboard not found.");
+      new import_obsidian11.Notice("Property Logs dashboard not found.");
       return;
     }
     const existing = this.app.workspace.getLeavesOfType(TIMELINE_VIEW_TYPE).find(
@@ -39986,13 +41714,88 @@ var PropertyLogsPlugin = class extends import_obsidian6.Plugin {
     await this.app.workspace.revealLeaf(leaf);
   }
   refreshDashboardViews() {
+    if (this.dashboardRefreshTimer !== null) window.clearTimeout(this.dashboardRefreshTimer);
+    this.dashboardRefreshTimer = window.setTimeout(() => {
+      this.dashboardRefreshTimer = null;
+      this.refreshDashboardViewsNow();
+    }, 80);
+  }
+  refreshDashboardViewsNow() {
     this.app.workspace.getLeavesOfType(TIMELINE_VIEW_TYPE).forEach((leaf) => {
       if (leaf.view instanceof TimelineDashboardView) leaf.view.refresh();
     });
+    this.embeds.forEach((embed) => embed.refresh());
+  }
+  // ─── Dashboard host ─────────────────────────────────────────────────────────
+  async duplicateDashboard(id) {
+    const dashboards = this.getDashboards();
+    const index = dashboards.findIndex((dashboard) => dashboard.id === id);
+    if (index === -1) {
+      new import_obsidian11.Notice("Property Logs dashboard not found.");
+      return null;
+    }
+    const source = dashboards[index];
+    const names = new Set(dashboards.map((dashboard) => dashboard.name));
+    let name = `${source.name} copy`;
+    for (let suffix = 2; names.has(name); suffix++) name = `${source.name} copy ${suffix}`;
+    const copy = duplicateDashboardSettings(
+      source,
+      `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`,
+      name
+    );
+    const next = [...dashboards];
+    next.splice(index + 1, 0, copy);
+    await this.setDashboards(next);
+    return copy;
+  }
+  getGlobalValueStyles() {
+    return this.settings.globalValueStyles;
+  }
+  getJournalMarkers() {
+    return this.settings.journalMarkers;
+  }
+  getPeriodicNotes() {
+    return this.periodicNotes;
+  }
+  getJournalNoteIndex() {
+    return this.journalNoteIndex;
+  }
+  getWeekStartsOn() {
+    return this.settings.weekStartsOn;
+  }
+  getPeriodWindowDays() {
+    return this.settings.periodWindowDays;
+  }
+  async setJournalMarkers(markers) {
+    this.settings.journalMarkers = markers;
+    this.journalNoteIndex.invalidate();
+    await this.save();
+    this.refreshDashboardViews();
+  }
+  async setWeekStartsOn(day) {
+    this.settings.weekStartsOn = Number.isInteger(day) && day >= 0 && day <= 6 ? day : 1;
+    await this.save();
+    this.refreshDashboardViews();
+  }
+  async setPeriodWindowDays(days) {
+    this.settings.periodWindowDays = normalizePeriodWindowDays(days);
+    await this.save();
+    this.refreshDashboardViews();
+  }
+  hasJournalsPlugin() {
+    return this.periodicNotes.hasJournals();
+  }
+  periodicNotesConfig() {
+    return {
+      dailyFolder: this.settings.dailyNoteLog.folder,
+      dailyFormat: this.settings.dailyNoteLog.dateFormat || "YYYY-MM-DD",
+      dateFields: ["journal-date", "date"],
+      weekStartsOn: this.settings.weekStartsOn
+    };
   }
   openDashboardPicker() {
     if (this.settings.dashboards.length === 0) {
-      new import_obsidian6.Notice("Create a dashboard in Property Logs settings first.");
+      new import_obsidian11.Notice("Create a dashboard in Property Logs settings first.");
     } else if (this.settings.dashboards.length === 1) {
       void this.openDashboard(this.settings.dashboards[0].id);
     } else {
@@ -40016,7 +41819,11 @@ var PropertyLogsPlugin = class extends import_obsidian6.Plugin {
         },
         dashboards: Array.isArray(data.settings.dashboards) ? data.settings.dashboards.map(
           (dashboard, index) => normalizeDashboardSettings(dashboard, `dashboard-${index + 1}`, `Dashboard ${index + 1}`)
-        ) : []
+        ) : [],
+        globalValueStyles: normalizeGlobalValueStyles(data.settings.globalValueStyles),
+        journalMarkers: normalizeJournalMarkers(data.settings.journalMarkers),
+        weekStartsOn: Number.isInteger(data.settings.weekStartsOn) && data.settings.weekStartsOn >= 0 && data.settings.weekStartsOn <= 6 ? data.settings.weekStartsOn : DEFAULT_SETTINGS.weekStartsOn,
+        periodWindowDays: normalizePeriodWindowDays(data.settings.periodWindowDays)
       };
     }
     if (data?.previousStatuses) {
@@ -40263,12 +42070,12 @@ var PropertyLogsPlugin = class extends import_obsidian6.Plugin {
   }
   async getOrCreateDailyNote() {
     const { folder, format } = this.resolveDailyNoteConfig();
-    const filename = `${(0, import_obsidian6.moment)().format(format)}.md`;
-    const path2 = (0, import_obsidian6.normalizePath)(folder ? `${folder}/${filename}` : filename);
+    const filename = `${(0, import_obsidian11.moment)().format(format)}.md`;
+    const path2 = (0, import_obsidian11.normalizePath)(folder ? `${folder}/${filename}` : filename);
     const existing = this.app.vault.getAbstractFileByPath(path2);
-    if (existing instanceof import_obsidian6.TFile) return existing;
+    if (existing instanceof import_obsidian11.TFile) return existing;
     if (folder) {
-      const folderPath = (0, import_obsidian6.normalizePath)(folder);
+      const folderPath = (0, import_obsidian11.normalizePath)(folder);
       if (!this.app.vault.getAbstractFileByPath(folderPath)) {
         await this.app.vault.createFolder(folderPath);
       }
@@ -40327,7 +42134,7 @@ var PropertyLogsPlugin = class extends import_obsidian6.Plugin {
     if (filtered.length === 0) return;
     const dailyNote = await this.getOrCreateDailyNote();
     if (dailyNote.path === file.path) return;
-    const now2 = (0, import_obsidian6.moment)();
+    const now2 = (0, import_obsidian11.moment)();
     const date2 = now2.format("YYYY-MM-DD");
     const time = now2.format("HH:mm");
     for (const change of filtered) {
@@ -40346,6 +42153,7 @@ var PropertyLogsPlugin = class extends import_obsidian6.Plugin {
     }
   }
   onunload() {
+    if (this.dashboardRefreshTimer !== null) window.clearTimeout(this.dashboardRefreshTimer);
     console.log("Property Logs Plugin unloaded");
   }
 };
@@ -40534,7 +42342,7 @@ const chartData = {
 
 window.renderChart(chartData, this.container);`;
 }
-var InsertChartModal = class extends import_obsidian6.Modal {
+var InsertChartModal = class extends import_obsidian11.Modal {
   constructor(app, plugin) {
     super(app);
     this.plugin = plugin;
@@ -40547,22 +42355,22 @@ var InsertChartModal = class extends import_obsidian6.Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.createEl("h2", { text: "Insert Status Chart" });
-    new import_obsidian6.Setting(contentEl).setName("Folder").setDesc("Filter pages by folder path (e.g. Management). Leave empty for all folders.").addText(
+    new import_obsidian11.Setting(contentEl).setName("Folder").setDesc("Filter pages by folder path (e.g. Management). Leave empty for all folders.").addText(
       (text) => text.setValue(this.folder).onChange((val) => this.folder = val)
     );
-    new import_obsidian6.Setting(contentEl).setName("Tags").setDesc("Filter pages by tags, comma-separated without # (e.g. area, project). Leave empty for all tags.").addText(
+    new import_obsidian11.Setting(contentEl).setName("Tags").setDesc("Filter pages by tags, comma-separated without # (e.g. area, project). Leave empty for all tags.").addText(
       (text) => text.setValue(this.tags).onChange((val) => this.tags = val)
     );
-    new import_obsidian6.Setting(contentEl).setName("Period").setDesc("The time interval for each data point on the X axis.").addDropdown(
+    new import_obsidian11.Setting(contentEl).setName("Period").setDesc("The time interval for each data point on the X axis.").addDropdown(
       (dropdown) => dropdown.addOption("week", "Week").addOption("month", "Month").addOption("quarter", "Quarter").addOption("year", "Year").setValue(this.periodType).onChange((val) => this.periodType = val)
     );
-    new import_obsidian6.Setting(contentEl).setName("Start date").setDesc("Start of the date range (YYYY-MM-DD).").addText(
+    new import_obsidian11.Setting(contentEl).setName("Start date").setDesc("Start of the date range (YYYY-MM-DD).").addText(
       (text) => text.setValue(this.startDate).onChange((val) => this.startDate = val)
     );
-    new import_obsidian6.Setting(contentEl).setName("End date").setDesc("End of the date range (YYYY-MM-DD).").addText(
+    new import_obsidian11.Setting(contentEl).setName("End date").setDesc("End of the date range (YYYY-MM-DD).").addText(
       (text) => text.setValue(this.endDate).onChange((val) => this.endDate = val)
     );
-    new import_obsidian6.Setting(contentEl).addButton(
+    new import_obsidian11.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Insert").setCta().onClick(async () => {
         await this.insertChart();
         this.close();
@@ -40592,7 +42400,7 @@ var InsertChartModal = class extends import_obsidian6.Modal {
     editor.replaceRange("```dataviewjs\n" + chartCode + "\n```", editor.getCursor());
   }
 };
-var AddCommentModal = class extends import_obsidian6.Modal {
+var AddCommentModal = class extends import_obsidian11.Modal {
   constructor(app, plugin, file) {
     super(app);
     this.comment = "";
@@ -40602,7 +42410,7 @@ var AddCommentModal = class extends import_obsidian6.Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.createEl("h2", { text: "Add comment to note" });
-    new import_obsidian6.Setting(contentEl).setName("Comment").addText((text) => {
+    new import_obsidian11.Setting(contentEl).setName("Comment").addText((text) => {
       text.setPlaceholder("Enter comment\u2026").onChange((val) => this.comment = val);
       text.inputEl.style.width = "100%";
       text.inputEl.addEventListener("keydown", (e) => {
@@ -40612,7 +42420,7 @@ var AddCommentModal = class extends import_obsidian6.Modal {
       });
       setTimeout(() => text.inputEl.focus(), 50);
     });
-    new import_obsidian6.Setting(contentEl).addButton(
+    new import_obsidian11.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Add").setCta().onClick(() => this.submit())
     ).addButton(
       (btn) => btn.setButtonText("Cancel").onClick(() => this.close())
@@ -40640,7 +42448,7 @@ var AddCommentModal = class extends import_obsidian6.Modal {
     this.close();
   }
 };
-var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
+var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -40654,6 +42462,8 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
       { id: "behavior", label: "Behavior" },
       { id: "daily", label: "Daily Note Log" },
       { id: "dashboards", label: "Dashboards" },
+      { id: "values", label: "Values" },
+      { id: "periodic", label: "Periodic Notes" },
       { id: "chart", label: "Chart Defaults" }
     ];
     const navEl = containerEl.createDiv({ cls: "status-history-tabs-nav" });
@@ -40735,13 +42545,13 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
     );
     const behaviorPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
     behaviorPane.setAttribute("data-tab", "behavior");
-    new import_obsidian6.Setting(behaviorPane).setName("Overwrite same-day entries").setDesc("When enabled, only the latest status change per day is kept instead of logging every change.").addToggle(
+    new import_obsidian11.Setting(behaviorPane).setName("Overwrite same-day entries").setDesc("When enabled, only the latest status change per day is kept instead of logging every change.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.overwriteSameDay).onChange(async (value) => {
         this.plugin.settings.overwriteSameDay = value;
         await this.plugin.save();
       })
     );
-    new import_obsidian6.Setting(behaviorPane).setName("Skip duplicate status").setDesc("When enabled, a status change is not logged if it is the same as the most recent entry in the history.").addToggle(
+    new import_obsidian11.Setting(behaviorPane).setName("Skip duplicate status").setDesc("When enabled, a status change is not logged if it is the same as the most recent entry in the history.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.skipDuplicateStatus).onChange(async (value) => {
         this.plugin.settings.skipDuplicateStatus = value;
         await this.plugin.save();
@@ -40752,19 +42562,19 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
       text: "Customize the frontmatter keys used when writing history entries.",
       cls: "setting-item-description"
     });
-    new import_obsidian6.Setting(behaviorPane).setName("History key").setDesc("The frontmatter key for the history array (default: status_history).").addText(
+    new import_obsidian11.Setting(behaviorPane).setName("History key").setDesc("The frontmatter key for the history array (default: status_history).").addText(
       (text) => text.setPlaceholder("status_history").setValue(this.plugin.settings.historyKey).onChange(async (val) => {
         this.plugin.settings.historyKey = val || "status_history";
         await this.plugin.save();
       })
     );
-    new import_obsidian6.Setting(behaviorPane).setName("Date key").setDesc("The key used for the date within each history entry (default: dateSet).").addText(
+    new import_obsidian11.Setting(behaviorPane).setName("Date key").setDesc("The key used for the date within each history entry (default: dateSet).").addText(
       (text) => text.setPlaceholder("dateSet").setValue(this.plugin.settings.dateKey).onChange(async (val) => {
         this.plugin.settings.dateKey = val || "dateSet";
         await this.plugin.save();
       })
     );
-    new import_obsidian6.Setting(behaviorPane).setName("Status key").setDesc("The key used for the status value within each history entry (default: statusSet).").addText(
+    new import_obsidian11.Setting(behaviorPane).setName("Status key").setDesc("The key used for the status value within each history entry (default: statusSet).").addText(
       (text) => text.setPlaceholder("statusSet").setValue(this.plugin.settings.statusKey).onChange(async (val) => {
         this.plugin.settings.statusKey = val || "statusSet";
         await this.plugin.save();
@@ -40781,7 +42591,7 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
       const props = this.plugin.settings.additionalProperties;
       for (let i2 = 0; i2 < props.length; i2++) {
         const item = props[i2];
-        new import_obsidian6.Setting(propListEl).setName(`${item.frontmatterKey} \u2192 ${item.historyKey}`).addButton(
+        new import_obsidian11.Setting(propListEl).setName(`${item.frontmatterKey} \u2192 ${item.historyKey}`).addButton(
           (btn) => btn.setIcon("arrow-up").setTooltip("Move up").setDisabled(i2 === 0).onClick(async () => {
             [props[i2 - 1], props[i2]] = [props[i2], props[i2 - 1]];
             await this.plugin.save();
@@ -40819,7 +42629,7 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
       histKeyInput.setValue("");
       renderPropList();
     };
-    new import_obsidian6.Setting(behaviorPane).addText((text) => {
+    new import_obsidian11.Setting(behaviorPane).addText((text) => {
       fmKeyInput = text;
       text.setPlaceholder("Frontmatter key (e.g. deadline)");
       text.inputEl.addEventListener("keydown", (e) => {
@@ -40838,37 +42648,43 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
     const dashboardsPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
     dashboardsPane.setAttribute("data-tab", "dashboards");
     renderDashboardSettingsPane(dashboardsPane, this.plugin);
+    const valuesPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
+    valuesPane.setAttribute("data-tab", "values");
+    renderValueSettingsPane(valuesPane, this.plugin);
+    const periodicPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
+    periodicPane.setAttribute("data-tab", "periodic");
+    renderPeriodicSettingsPane(periodicPane, this.plugin);
     const chartPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
     chartPane.setAttribute("data-tab", "chart");
     chartPane.createEl("p", {
       text: "Default values pre-filled when using the 'Insert status chart' command. Updated automatically when you insert a chart.",
       cls: "setting-item-description"
     });
-    new import_obsidian6.Setting(chartPane).setName("Default folder").setDesc("Folder path to filter pages by (e.g. Management).").addText(
+    new import_obsidian11.Setting(chartPane).setName("Default folder").setDesc("Folder path to filter pages by (e.g. Management).").addText(
       (text) => text.setPlaceholder("e.g. Management").setValue(this.plugin.settings.chartDefaults.folder).onChange(async (val) => {
         this.plugin.settings.chartDefaults.folder = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian6.Setting(chartPane).setName("Default tags").setDesc("Tags to filter pages by, comma-separated without # (e.g. area, project).").addText(
+    new import_obsidian11.Setting(chartPane).setName("Default tags").setDesc("Tags to filter pages by, comma-separated without # (e.g. area, project).").addText(
       (text) => text.setPlaceholder("e.g. area, project").setValue(this.plugin.settings.chartDefaults.tags).onChange(async (val) => {
         this.plugin.settings.chartDefaults.tags = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian6.Setting(chartPane).setName("Default period").setDesc("The time interval for each data point.").addDropdown(
+    new import_obsidian11.Setting(chartPane).setName("Default period").setDesc("The time interval for each data point.").addDropdown(
       (dropdown) => dropdown.addOption("week", "Week").addOption("month", "Month").addOption("quarter", "Quarter").addOption("year", "Year").setValue(this.plugin.settings.chartDefaults.periodType).onChange(async (val) => {
         this.plugin.settings.chartDefaults.periodType = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian6.Setting(chartPane).setName("Default start date").setDesc("Start of the date range (YYYY-MM-DD).").addText(
+    new import_obsidian11.Setting(chartPane).setName("Default start date").setDesc("Start of the date range (YYYY-MM-DD).").addText(
       (text) => text.setPlaceholder(`${currentYear}-01-01`).setValue(this.plugin.settings.chartDefaults.startDate).onChange(async (val) => {
         this.plugin.settings.chartDefaults.startDate = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian6.Setting(chartPane).setName("Default end date").setDesc("End of the date range (YYYY-MM-DD).").addText(
+    new import_obsidian11.Setting(chartPane).setName("Default end date").setDesc("End of the date range (YYYY-MM-DD).").addText(
       (text) => text.setPlaceholder(`${currentYear}-12-31`).setValue(this.plugin.settings.chartDefaults.endDate).onChange(async (val) => {
         this.plugin.settings.chartDefaults.endDate = val;
         await this.plugin.save();
@@ -40878,7 +42694,7 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
   }
   renderDailyNoteLogPane(pane) {
     const settings = this.plugin.settings.dailyNoteLog;
-    new import_obsidian6.Setting(pane).setName("Enable daily note logging").setDesc("Append a log entry to the daily note whenever a tracked property changes on a watched file.").addToggle(
+    new import_obsidian11.Setting(pane).setName("Enable daily note logging").setDesc("Append a log entry to the daily note whenever a tracked property changes on a watched file.").addToggle(
       (toggle) => toggle.setValue(settings.enabled).onChange(async (value) => {
         this.plugin.settings.dailyNoteLog.enabled = value;
         await this.plugin.save();
@@ -40889,19 +42705,19 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
       text: "If the core Daily Notes plugin is enabled, its folder and date format are used. Otherwise the values below are used as a fallback.",
       cls: "setting-item-description"
     });
-    new import_obsidian6.Setting(pane).setName("Folder (fallback)").setDesc("Folder where daily notes are stored. Leave empty for the vault root.").addText(
+    new import_obsidian11.Setting(pane).setName("Folder (fallback)").setDesc("Folder where daily notes are stored. Leave empty for the vault root.").addText(
       (text) => text.setPlaceholder("e.g. Daily").setValue(settings.folder).onChange(async (val) => {
         this.plugin.settings.dailyNoteLog.folder = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian6.Setting(pane).setName("Date format (fallback)").setDesc("Moment.js format used for the daily note filename (e.g. YYYY-MM-DD).").addText(
+    new import_obsidian11.Setting(pane).setName("Date format (fallback)").setDesc("Moment.js format used for the daily note filename (e.g. YYYY-MM-DD).").addText(
       (text) => text.setPlaceholder("YYYY-MM-DD").setValue(settings.dateFormat).onChange(async (val) => {
         this.plugin.settings.dailyNoteLog.dateFormat = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian6.Setting(pane).setName("Heading (optional)").setDesc("If set, log entries are inserted under this heading (e.g. '## Status Changes'). The heading is created if missing. Leave empty to append to the end of the daily note.").addText(
+    new import_obsidian11.Setting(pane).setName("Heading (optional)").setDesc("If set, log entries are inserted under this heading (e.g. '## Status Changes'). The heading is created if missing. Leave empty to append to the end of the daily note.").addText(
       (text) => text.setPlaceholder("e.g. ## Status Changes").setValue(settings.heading).onChange(async (val) => {
         this.plugin.settings.dailyNoteLog.heading = val;
         await this.plugin.save();
@@ -40922,7 +42738,7 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
       const groups = this.plugin.settings.dailyNoteLog.groups;
       groups.forEach((group, i2) => {
         const card = groupsEl.createDiv({ cls: "status-history-group-card" });
-        new import_obsidian6.Setting(card).setName(`Group ${i2 + 1}${group.tag ? `: #${group.tag}` : ""}`).addButton(
+        new import_obsidian11.Setting(card).setName(`Group ${i2 + 1}${group.tag ? `: #${group.tag}` : ""}`).addButton(
           (btn) => btn.setIcon("arrow-up").setTooltip("Move up").setDisabled(i2 === 0).onClick(async () => {
             [groups[i2 - 1], groups[i2]] = [groups[i2], groups[i2 - 1]];
             await this.plugin.save();
@@ -40941,25 +42757,25 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
             renderGroups();
           })
         );
-        new import_obsidian6.Setting(card).setName("Tag").setDesc("Notes carrying this tag use this group's template (without '#').").addText(
+        new import_obsidian11.Setting(card).setName("Tag").setDesc("Notes carrying this tag use this group's template (without '#').").addText(
           (text) => text.setPlaceholder("e.g. project").setValue(group.tag).onChange(async (val) => {
             group.tag = val.trim().replace(/^#/, "");
             await this.plugin.save();
           })
         );
-        new import_obsidian6.Setting(card).setName("Watched property keys").setDesc("Comma-separated frontmatter keys this group logs (e.g. status, deadline). Leave empty to log every tracked change.").addText(
+        new import_obsidian11.Setting(card).setName("Watched property keys").setDesc("Comma-separated frontmatter keys this group logs (e.g. status, deadline). Leave empty to log every tracked change.").addText(
           (text) => text.setPlaceholder("status, deadline").setValue(group.watchedKeys.join(", ")).onChange(async (val) => {
             group.watchedKeys = val.split(",").map((k) => k.trim()).filter((k) => k);
             await this.plugin.save();
           })
         );
-        new import_obsidian6.Setting(card).setName("{{key}} uses").setDesc("Which name to substitute for the {{key}} placeholder.").addDropdown(
+        new import_obsidian11.Setting(card).setName("{{key}} uses").setDesc("Which name to substitute for the {{key}} placeholder.").addDropdown(
           (dropdown) => dropdown.addOption("frontmatter", "Frontmatter key (e.g. status)").addOption("history", "History key (e.g. statusSet)").setValue(group.keyForm).onChange(async (val) => {
             group.keyForm = val;
             await this.plugin.save();
           })
         );
-        const templateSetting = new import_obsidian6.Setting(card).setName("Template").setDesc("Line written to the daily note. Multiple lines are supported.");
+        const templateSetting = new import_obsidian11.Setting(card).setName("Template").setDesc("Line written to the daily note. Multiple lines are supported.");
         templateSetting.addTextArea((text) => {
           text.setPlaceholder("- {{link}}: {{key}} changed from {{from}} to {{to}}").setValue(group.template).onChange(async (val) => {
             group.template = val;
@@ -40972,7 +42788,7 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
       });
     };
     renderGroups();
-    new import_obsidian6.Setting(pane).addButton(
+    new import_obsidian11.Setting(pane).addButton(
       (btn) => btn.setButtonText("Add group").setCta().onClick(async () => {
         this.plugin.settings.dailyNoteLog.groups.push({
           tag: "",
@@ -40992,7 +42808,7 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
     const renderList = () => {
       listEl.empty();
       for (const item of getItems()) {
-        new import_obsidian6.Setting(listEl).setName(item).addButton(
+        new import_obsidian11.Setting(listEl).setName(item).addButton(
           (btn) => btn.setIcon("trash").setTooltip("Remove").onClick(async () => {
             await onRemove(item);
             renderList();
@@ -41009,7 +42825,7 @@ var StatusHistorySettingTab = class extends import_obsidian6.PluginSettingTab {
       input.setValue("");
       renderList();
     };
-    new import_obsidian6.Setting(containerEl).addText((text) => {
+    new import_obsidian11.Setting(containerEl).addText((text) => {
       input = text;
       text.setPlaceholder(placeholder);
       text.inputEl.addEventListener("keydown", (e) => {

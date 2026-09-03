@@ -34,12 +34,20 @@ export interface DashboardSettings {
   levelColors: Record<TimelineLevel, string>;
   colorProperty: string;
   colorPropertyMap: Record<string, string>;
+  /** Overrides for the vault-wide value colors, used by the "value" color mode. */
+  valueColors: Record<string, string>;
   scopeFilter: DashboardScopeFilter;
   rowProperties: string[];
   groupBy: DashboardGroupBy;
   sortBy: DashboardSortBy;
   sortAscending: boolean;
   noteOpenGesture: NoteOpenGesture;
+  /** Group ids collapsed into a single minimal row. */
+  foldedGroups: string[];
+  /** Draws the clickable day/week/month axis and its dividers. */
+  showPeriodAxis: boolean;
+  /** Shows `- [n] …` lines from periodic notes as timeline notes. */
+  showJournalNotes: boolean;
 }
 
 export interface DashboardFileData {
@@ -113,6 +121,7 @@ export function createDashboardSettings(id: string, name = "Dashboard"): Dashboa
     levelColors: { ...DEFAULT_LEVEL_COLORS },
     colorProperty: "tags",
     colorPropertyMap: {},
+    valueColors: {},
     scopeFilter: {
       includedFolders: [...EMPTY_SCOPE.includedFolders],
       includedTags: [...EMPTY_SCOPE.includedTags],
@@ -126,7 +135,23 @@ export function createDashboardSettings(id: string, name = "Dashboard"): Dashboa
     sortBy: "alphabetical",
     sortAscending: true,
     noteOpenGesture: "ctrl-click",
+    foldedGroups: [],
+    showPeriodAxis: true,
+    showJournalNotes: true,
   };
+}
+
+/** Deep copy of a dashboard under a new identity, so edits never alias the original. */
+export function duplicateDashboardSettings(
+  dashboard: DashboardSettings,
+  id: string,
+  name: string
+): DashboardSettings {
+  return normalizeDashboardSettings(
+    JSON.parse(JSON.stringify({ ...dashboard, id, name })),
+    id,
+    name
+  );
 }
 
 export function normalizeDashboardSettings(
@@ -165,7 +190,9 @@ export function normalizeDashboardSettings(
     levelMapping: levelMap(value.levelMapping),
     defaultLevelForUnset: level(value.defaultLevelForUnset, defaults.defaultLevelForUnset),
     unmappedValueLevel: level(value.unmappedValueLevel, defaults.unmappedValueLevel),
-    colorMode: value.colorMode === "property" ? "property" : "level",
+    colorMode: value.colorMode === "property" || value.colorMode === "value"
+      ? value.colorMode
+      : "level",
     levelColors: {
       0: normalizeTimelineColor(rawLevelColors["0"], DEFAULT_LEVEL_COLORS[0]),
       1: normalizeTimelineColor(rawLevelColors["1"], DEFAULT_LEVEL_COLORS[1]),
@@ -178,6 +205,12 @@ export function normalizeDashboardSettings(
       : defaults.colorProperty,
     colorPropertyMap: Object.fromEntries(
       Object.entries(stringMap(value.colorPropertyMap)).map(([key, color]) => [
+        key,
+        normalizeTimelineColor(color, DEFAULT_PROPERTY_COLOR),
+      ])
+    ),
+    valueColors: Object.fromEntries(
+      Object.entries(stringMap(value.valueColors)).map(([key, color]) => [
         key,
         normalizeTimelineColor(color, DEFAULT_PROPERTY_COLOR),
       ])
@@ -195,6 +228,9 @@ export function normalizeDashboardSettings(
     sortBy,
     sortAscending: typeof value.sortAscending === "boolean" ? value.sortAscending : true,
     noteOpenGesture: value.noteOpenGesture === "click" ? "click" : "ctrl-click",
+    foldedGroups: strings(value.foldedGroups),
+    showPeriodAxis: typeof value.showPeriodAxis === "boolean" ? value.showPeriodAxis : true,
+    showJournalNotes: typeof value.showJournalNotes === "boolean" ? value.showJournalNotes : true,
   };
 }
 
