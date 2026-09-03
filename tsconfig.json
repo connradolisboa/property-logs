@@ -4,8 +4,10 @@
     "module": "CommonJS",
     "lib": ["ES2018", "DOM"],
     "strict": true,
+    "skipLibCheck": true,
     "moduleResolution": "node",
     "noEmit": true
   },
-  "include": ["main.ts"]
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
 }

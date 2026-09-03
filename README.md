@@ -10,6 +10,7 @@ An [Obsidian](https://obsidian.md) plugin that automatically logs property chang
 - **Comments** — Add timestamped comments to notes to annotate status history
 - **Daily note logging** — Mirror property changes into your daily note using tag-based templates, so you can see at a glance what moved each day
 - **Visual status charts** — Insert interactive charts that visualize how status evolved over time across multiple notes (requires [Dataview](https://github.com/blacksmithgu/obsidian-dataview) and [Obsidian Charts](https://github.com/phibr0/obsidian-charts))
+- **Timeline dashboards** — Create saved, interactive date-axis dashboards with independent scope, grouping, sorting, colors, and click-to-update bars
 - **Customizable keys** — Rename the history key and property names to match your vault's naming conventions
 - **Multiple tracked properties** — Go beyond status—track deadline changes, priority updates, assignees, or any other property
 
@@ -204,9 +205,39 @@ Pre-fill defaults when inserting charts. These are automatically updated each ti
 | **Default start date** | Start of the date range (`YYYY-MM-DD` format) |
 | **Default end date** | End of the date range (`YYYY-MM-DD` format) |
 
+#### Dashboards Tab
+
+Create one or more saved timeline dashboards. Each dashboard has independent configuration for:
+
+| Setting | Description |
+|---------|-------------|
+| **Tracked property** | Live frontmatter property that determines the displayed level. Its configured history key is used when available; otherwise Property Logs uses `{property}Set`. |
+| **Value mapping** | Maps known property values to levels 0–4. Level 0 always hides that portion of the timeline. |
+| **Unset and unmapped levels** | Controls notes without tracked history and free-text values that are not in the map. |
+| **Color mode** | Colors bars by level or by another frontmatter property. |
+| **Scope** | Includes or excludes folders, tags, and property rules for this dashboard only. Exclusions take priority. |
+| **Row properties** | Current frontmatter values or latest history-entry values displayed beside each note title. |
+| **Group and sort defaults** | Starts with folder, level, alphabetical, recently changed, or any selected frontmatter property. |
+
+Clicking a timeline bar opens a value picker. Choosing a mapped value or entering free text updates both the note's live property and its existing history array. Choosing a value mapped to level 0 hides the new segment without deleting history.
+
 ## Commands
 
-The plugin adds two commands (accessible via Ctrl/Cmd+P command palette):
+The plugin adds three commands (accessible via Ctrl/Cmd+P command palette):
+
+### Open Timeline Dashboard
+
+Opens a saved Property Logs timeline. If more than one dashboard exists, a fuzzy picker lets you choose one. The same action is available from the ribbon.
+
+From the dashboard you can:
+
+- Group and sort rows without leaving the view
+- Switch between level and property coloring
+- Open a note from its row label
+- Click a bar to update the tracked value
+- Add an eligible existing note or create a new note and set its initial value
+
+The timeline uses the bundled `vis-timeline` renderer; no companion plugin is required.
 
 ### Insert Status Chart
 

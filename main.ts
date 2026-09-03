@@ -1,4 +1,14 @@
-import { App, Modal, Plugin, PluginSettingTab, Setting, TextAreaComponent, TextComponent, TFile, moment, normalizePath } from "obsidian";
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TextAreaComponent, TextComponent, TFile, moment, normalizePath } from "obsidian";
+
+import {
+  DashboardSettings,
+  isFileInDashboardScope,
+  normalizeDashboardSettings,
+} from "./data/dashboard";
+import { collectCompatibleHistory, historyContainsKey } from "./data/historyCompatibility";
+import { DashboardPickerModal } from "./modals/DashboardPickerModal";
+import { renderDashboardSettingsPane } from "./settings/dashboardSettings";
+import { TIMELINE_VIEW_TYPE, TimelineDashboardView } from "./view/TimelineView";
 
 type StatusEntry = Record<string, string>;
 
@@ -40,6 +50,7 @@ interface PluginSettings {
     endDate: string;
   };
   dailyNoteLog: DailyNoteLogSettings;
+  dashboards: DashboardSettings[];
 }
 
 interface PluginData {
@@ -75,6 +86,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
     heading: "",
     groups: [],
   },
+  dashboards: [],
 };
 
 export default class PropertyLogsPlugin extends Plugin {
@@ -87,7 +99,19 @@ export default class PropertyLogsPlugin extends Plugin {
 
     await this.load_();
 
+    this.registerView(TIMELINE_VIEW_TYPE, (leaf) => new TimelineDashboardView(leaf, this));
+
     this.addSettingTab(new StatusHistorySettingTab(this.app, this));
+
+    this.addRibbonIcon("chart-gantt", "Open Property Logs dashboard", () => {
+      this.openDashboardPicker();
+    });
+
+    this.addCommand({
+      id: "open-property-logs-dashboard",
+      name: "Open timeline dashboard",
+      callback: () => this.openDashboardPicker(),
+    });
 
     this.addCommand({
       id: "insert-status-chart",
@@ -114,9 +138,144 @@ export default class PropertyLogsPlugin extends Plugin {
 
     this.registerEvent(
       this.app.metadataCache.on("changed", (file: TFile) => {
-        this.handleMetadataChange(file);
+        void this.handleMetadataChange(file);
+        this.refreshDashboardViews();
       })
     );
+
+    this.registerEvent(this.app.vault.on("create", () => this.refreshDashboardViews()));
+    this.registerEvent(this.app.vault.on("delete", () => this.refreshDashboardViews()));
+    this.registerEvent(this.app.vault.on("rename", () => this.refreshDashboardViews()));
+  }
+
+  getDashboards(): DashboardSettings[] {
+    return this.settings.dashboards;
+  }
+
+  getDashboard(id: string): DashboardSettings | undefined {
+    return this.settings.dashboards.find((dashboard) => dashboard.id === id);
+  }
+
+  async setDashboards(dashboards: DashboardSettings[]): Promise<void> {
+    this.settings.dashboards = dashboards;
+    await this.save();
+    this.refreshDashboardViews();
+  }
+
+  getDashboardHistoryKey(): string {
+    return this.settings.historyKey;
+  }
+
+  getDashboardDateKey(): string {
+    return this.settings.dateKey;
+  }
+
+  getDashboardFiles(dashboard: DashboardSettings): TFile[] {
+    return this.app.vault.getMarkdownFiles().filter((file) => {
+      const cache = this.app.metadataCache.getFileCache(file);
+      const tags = new Set<string>();
+      const frontmatterTags = cache?.frontmatter?.tags;
+      if (Array.isArray(frontmatterTags)) {
+        frontmatterTags.forEach((tag) => tags.add(String(tag).replace(/^#/, "")));
+      } else if (frontmatterTags !== undefined && frontmatterTags !== null) {
+        tags.add(String(frontmatterTags).replace(/^#/, ""));
+      }
+      cache?.tags?.forEach((tag) => tags.add(tag.tag.replace(/^#/, "")));
+      return isFileInDashboardScope({
+        path: file.path,
+        tags,
+        frontmatter: cache?.frontmatter as Record<string, unknown> | undefined,
+      }, dashboard.scopeFilter);
+    });
+  }
+
+  noteHasTrackedHistory(file: TFile, dashboard: DashboardSettings): boolean {
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+    const history = collectCompatibleHistory(
+      frontmatter ?? {},
+      this.settings.historyKey,
+      this.settings.dateKey
+    );
+    const trackedHistoryKey = this.resolveHistoryKey(dashboard.trackedPropertyKey);
+    return historyContainsKey(history, trackedHistoryKey);
+  }
+
+  async createDashboardNote(title: string, folder: string, dashboard: DashboardSettings): Promise<TFile> {
+    const normalizedFolder = normalizePath(folder).replace(/^\/+|\/+$/g, "");
+    if (normalizedFolder) {
+      const segments = normalizedFolder.split("/");
+      let current = "";
+      for (const segment of segments) {
+        current = current ? `${current}/${segment}` : segment;
+        if (!this.app.vault.getAbstractFileByPath(current)) {
+          await this.app.vault.createFolder(current);
+        }
+      }
+    }
+    const path = normalizePath(normalizedFolder ? `${normalizedFolder}/${title}.md` : `${title}.md`);
+    if (this.app.vault.getAbstractFileByPath(path)) {
+      throw new Error(`A note already exists at ${path}.`);
+    }
+    const file = await this.app.vault.create(path, "");
+    const firstTag = dashboard.scopeFilter.includedTags[0];
+    const firstProperty = dashboard.scopeFilter.includedProperties[0];
+    if (firstTag || (firstProperty && firstProperty.key !== dashboard.trackedPropertyKey)) {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        if (firstTag) {
+          const existing = Array.isArray(frontmatter.tags)
+            ? frontmatter.tags.map(String)
+            : frontmatter.tags
+              ? [String(frontmatter.tags)]
+              : [];
+          if (!existing.includes(firstTag)) existing.push(firstTag);
+          frontmatter.tags = existing;
+        }
+        if (firstProperty && firstProperty.key !== dashboard.trackedPropertyKey) {
+          frontmatter[firstProperty.key] = firstProperty.value || true;
+        }
+      });
+    }
+    return file;
+  }
+
+  async openDashboard(id: string): Promise<void> {
+    const dashboard = this.getDashboard(id);
+    if (!dashboard) {
+      new Notice("Property Logs dashboard not found.");
+      return;
+    }
+
+    const existing = this.app.workspace.getLeavesOfType(TIMELINE_VIEW_TYPE).find((leaf) =>
+      leaf.view instanceof TimelineDashboardView && leaf.view.getState().dashboardId === id
+    );
+    if (existing) {
+      await this.app.workspace.revealLeaf(existing);
+      return;
+    }
+
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({
+      type: TIMELINE_VIEW_TYPE,
+      active: true,
+      state: { dashboardId: id },
+    });
+    await this.app.workspace.revealLeaf(leaf);
+  }
+
+  refreshDashboardViews(): void {
+    this.app.workspace.getLeavesOfType(TIMELINE_VIEW_TYPE).forEach((leaf) => {
+      if (leaf.view instanceof TimelineDashboardView) leaf.view.refresh();
+    });
+  }
+
+  private openDashboardPicker(): void {
+    if (this.settings.dashboards.length === 0) {
+      new Notice("Create a dashboard in Property Logs settings first.");
+    } else if (this.settings.dashboards.length === 1) {
+      void this.openDashboard(this.settings.dashboards[0].id);
+    } else {
+      new DashboardPickerModal(this.app, this).open();
+    }
   }
 
   async load_() {
@@ -134,6 +293,11 @@ export default class PropertyLogsPlugin extends Plugin {
           ...(data.settings.dailyNoteLog ?? {}),
           groups: data.settings.dailyNoteLog?.groups ?? [],
         },
+        dashboards: Array.isArray(data.settings.dashboards)
+          ? data.settings.dashboards.map((dashboard, index) =>
+              normalizeDashboardSettings(dashboard, `dashboard-${index + 1}`, `Dashboard ${index + 1}`)
+            )
+          : [],
       };
     }
     if (data?.previousStatuses) {
@@ -161,7 +325,7 @@ export default class PropertyLogsPlugin extends Plugin {
       if (fm.status) {
         this.previousStatuses.set(file.path, String(fm.status));
       }
-      const props = this.settings.additionalProperties;
+      const props = this.getTrackedPropertyConfigs();
       if (props.length > 0) {
         const existing = this.previousPropertyValues.get(file.path) ?? {};
         let changed = false;
@@ -227,7 +391,7 @@ export default class PropertyLogsPlugin extends Plugin {
     const realChanges: Array<{ fmKey: string; histKey: string; from: string; to: string }> = [];
     // updatedTracking: frontmatterKey → new value (for persisting previous values)
     const updatedTracking: Record<string, string> = { ...prevProps };
-    for (const { frontmatterKey, historyKey } of this.settings.additionalProperties) {
+    for (const { frontmatterKey, historyKey } of this.getTrackedPropertyConfigs()) {
       const newVal = fm?.[frontmatterKey];
       if (newVal === undefined || newVal === null) continue;
       const strVal = String(newVal);
@@ -266,7 +430,11 @@ export default class PropertyLogsPlugin extends Plugin {
     if (entry[dateKey] !== undefined) ordered[dateKey] = entry[dateKey];
     if (entry["comment"] !== undefined) ordered["comment"] = entry["comment"];
     if (entry[statusKey] !== undefined) ordered[statusKey] = entry[statusKey];
-    for (const { historyKey } of additionalProperties) {
+    const orderedPropertyKeys = [
+      ...additionalProperties.map((property) => property.historyKey),
+      ...this.settings.dashboards.map((dashboard) => this.resolveHistoryKey(dashboard.trackedPropertyKey)),
+    ];
+    for (const historyKey of new Set(orderedPropertyKeys)) {
       if (entry[historyKey] !== undefined) ordered[historyKey] = entry[historyKey];
     }
     for (const [k, v] of Object.entries(entry)) {
@@ -275,33 +443,122 @@ export default class PropertyLogsPlugin extends Plugin {
     return ordered;
   }
 
-  async appendStatusHistory(file: TFile, newStatus?: string, changedProps: Record<string, string> = {}) {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  resolveHistoryKey(frontmatterKey: string): string {
+    if (frontmatterKey === "status") return this.settings.statusKey;
+    return this.settings.additionalProperties.find(
+      (property) => property.frontmatterKey === frontmatterKey
+    )?.historyKey ?? `${frontmatterKey}Set`;
+  }
+
+  private getTrackedPropertyConfigs(): Array<{ frontmatterKey: string; historyKey: string }> {
+    const properties = new Map<string, string>();
+    this.settings.additionalProperties.forEach((property) => {
+      if (property.frontmatterKey !== "status") {
+        properties.set(property.frontmatterKey, property.historyKey);
+      }
+    });
+    this.settings.dashboards.forEach((dashboard) => {
+      const key = dashboard.trackedPropertyKey.trim();
+      if (key && key !== "status" && !properties.has(key)) {
+        properties.set(key, this.resolveHistoryKey(key));
+      }
+    });
+    return Array.from(properties, ([frontmatterKey, historyKey]) => ({ frontmatterKey, historyKey }));
+  }
+
+  private updateHistoryInFrontmatter(
+    frontmatter: Record<string, any>,
+    today: string,
+    newStatus?: string,
+    changedProps: Record<string, string> = {}
+  ): boolean {
     const { historyKey, dateKey, statusKey } = this.settings;
+    const history: StatusEntry[] = Array.isArray(frontmatter[historyKey])
+      ? frontmatter[historyKey]
+      : [];
+
+    if (
+      this.settings.skipDuplicateStatus &&
+      newStatus !== undefined &&
+      history.length > 0 &&
+      history[history.length - 1][statusKey] === newStatus
+    ) {
+      return false;
+    }
 
     const newEntry: StatusEntry = { [dateKey]: today };
     if (newStatus !== undefined) newEntry[statusKey] = newStatus;
-    for (const [k, v] of Object.entries(changedProps)) newEntry[k] = v;
+    for (const [key, value] of Object.entries(changedProps)) newEntry[key] = value;
 
+    const lastEntry = history.length > 0 ? history[history.length - 1] : null;
+    if (lastEntry?.[dateKey] === today) {
+      history[history.length - 1] = this.normalizeEntry({ ...lastEntry, ...newEntry });
+    } else {
+      history.push(this.normalizeEntry(newEntry));
+    }
+    frontmatter[historyKey] = history;
+    return true;
+  }
+
+  async appendStatusHistory(file: TFile, newStatus?: string, changedProps: Record<string, string> = {}) {
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-      const history: StatusEntry[] = Array.isArray(frontmatter[historyKey])
-        ? frontmatter[historyKey]
-        : [];
-      if (this.settings.skipDuplicateStatus && newStatus !== undefined && history.length > 0 && history[history.length - 1][statusKey] === newStatus) {
-        return;
-      }
-      const lastEntry = history.length > 0 ? history[history.length - 1] : null;
-      const isSameDay = lastEntry?.[dateKey] === today;
-      if (isSameDay) {
-        history[history.length - 1] = this.normalizeEntry(Object.assign({}, lastEntry, newEntry));
-      } else {
-        history.push(this.normalizeEntry(newEntry));
-      }
-      frontmatter[historyKey] = history;
+      this.updateHistoryInFrontmatter(frontmatter, today, newStatus, changedProps);
     });
 
     console.log(`Property Logs: logged changes for ${file.name}`);
+  }
+
+  async setTrackedPropertyValue(file: TFile, frontmatterKey: string, value: string): Promise<void> {
+    const key = frontmatterKey.trim();
+    if (!key) throw new Error("A tracked frontmatter property is required.");
+
+    const cache = this.app.metadataCache.getFileCache(file);
+    const currentRaw = cache?.frontmatter?.[key];
+    const previousValue = currentRaw === undefined || currentRaw === null ? "" : String(currentRaw);
+    if (previousValue === value) return;
+
+    const historyKey = this.resolveHistoryKey(key);
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+
+    if (key === "status") {
+      this.previousStatuses.set(file.path, value);
+    } else {
+      const previous = this.previousPropertyValues.get(file.path) ?? {};
+      this.previousPropertyValues.set(file.path, { ...previous, [key]: value });
+    }
+
+    try {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        frontmatter[key] = value;
+        this.updateHistoryInFrontmatter(
+          frontmatter,
+          today,
+          key === "status" ? value : undefined,
+          key === "status" ? {} : { [historyKey]: value }
+        );
+      });
+      await this.save();
+      await this.logChangesToDailyNote(file, [{
+        fmKey: key,
+        histKey: historyKey,
+        from: previousValue,
+        to: value,
+      }]);
+    } catch (error) {
+      if (key === "status") {
+        if (currentRaw === undefined || currentRaw === null) this.previousStatuses.delete(file.path);
+        else this.previousStatuses.set(file.path, previousValue);
+      } else {
+        const tracked = { ...(this.previousPropertyValues.get(file.path) ?? {}) };
+        if (currentRaw === undefined || currentRaw === null) delete tracked[key];
+        else tracked[key] = previousValue;
+        this.previousPropertyValues.set(file.path, tracked);
+      }
+      throw error;
+    }
   }
 
   // ─── Daily Note Logging ─────────────────────────────────────────────────────
@@ -843,6 +1100,7 @@ class StatusHistorySettingTab extends PluginSettingTab {
       { id: "filters", label: "Filters" },
       { id: "behavior", label: "Behavior" },
       { id: "daily", label: "Daily Note Log" },
+      { id: "dashboards", label: "Dashboards" },
       { id: "chart", label: "Chart Defaults" },
     ];
 
@@ -1085,6 +1343,11 @@ class StatusHistorySettingTab extends PluginSettingTab {
     const dailyPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
     dailyPane.setAttribute("data-tab", "daily");
     this.renderDailyNoteLogPane(dailyPane);
+
+    // --- Dashboards tab ---
+    const dashboardsPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
+    dashboardsPane.setAttribute("data-tab", "dashboards");
+    renderDashboardSettingsPane(dashboardsPane, this.plugin);
 
     // --- Chart Defaults tab ---
     const chartPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
