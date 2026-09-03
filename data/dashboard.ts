@@ -19,8 +19,9 @@ export interface DashboardScopeFilter {
   excludedProperties: DashboardPropertyRule[];
 }
 
-export type DashboardGroupBy = "none" | "folder" | "level" | `property:${string}`;
+export type DashboardGroupBy = "status" | "none" | "folder" | "level" | `property:${string}`;
 export type DashboardSortBy = "alphabetical" | "level" | "recent" | `property:${string}`;
+export type NoteOpenGesture = "click" | "ctrl-click";
 
 export interface DashboardSettings {
   id: string;
@@ -38,6 +39,7 @@ export interface DashboardSettings {
   groupBy: DashboardGroupBy;
   sortBy: DashboardSortBy;
   sortAscending: boolean;
+  noteOpenGesture: NoteOpenGesture;
 }
 
 export interface DashboardFileData {
@@ -120,9 +122,10 @@ export function createDashboardSettings(id: string, name = "Dashboard"): Dashboa
       excludedProperties: [...EMPTY_SCOPE.excludedProperties],
     },
     rowProperties: [],
-    groupBy: "none",
+    groupBy: "status",
     sortBy: "alphabetical",
     sortAscending: true,
+    noteOpenGesture: "ctrl-click",
   };
 }
 
@@ -140,6 +143,7 @@ export function normalizeDashboardSettings(
     : {};
   const rawLevelColors = stringMap(value.levelColors);
   const groupBy = typeof value.groupBy === "string" && (
+    value.groupBy === "status" ||
     value.groupBy === "none" ||
     value.groupBy === "folder" ||
     value.groupBy === "level" ||
@@ -190,6 +194,7 @@ export function normalizeDashboardSettings(
     groupBy,
     sortBy,
     sortAscending: typeof value.sortAscending === "boolean" ? value.sortAscending : true,
+    noteOpenGesture: value.noteOpenGesture === "click" ? "click" : "ctrl-click",
   };
 }
 

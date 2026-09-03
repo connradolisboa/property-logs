@@ -136,6 +136,25 @@ test("assigns the configured fallback level to unmapped free text", () => {
   assert.equal(result.segments[0].level, 1);
 });
 
+test("coalesces consecutive identical tracked values into one segment", () => {
+  const result = reconstructHistorySegments(options({
+    history: [
+      { dateSet: "2026-09-01", relevantSet: "High" },
+      { dateSet: "2026-09-02", relevantSet: "High" },
+      { dateSet: "2026-09-03", relevantSet: "Mid" },
+    ],
+  }));
+
+  assert.deepEqual(result.segments.map((segment) => ({
+    value: segment.value,
+    start: dateOnly(segment.start),
+    end: dateOnly(segment.end),
+  })), [
+    { value: "High", start: "2026-09-01", end: "2026-09-03" },
+    { value: "Mid", start: "2026-09-03", end: "2026-09-04" },
+  ]);
+});
+
 test("resolves property colors, including the first mapped array value", () => {
   const result = reconstructHistorySegments(options({
     history: [{ dateSet: "2026-09-02", relevantSet: "High" }],

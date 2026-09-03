@@ -290,6 +290,9 @@ export function reconstructHistorySegments(
   changes.sort((a, b) =>
     a.date.getTime() - b.date.getTime() || a.sourceIndex - b.sourceIndex
   );
+  const coalescedChanges = changes.filter((change, index) =>
+    index === 0 || change.value !== changes[index - 1].value
+  );
 
   const segments: TimelineSegment[] = [];
   let currentValue: string | null = null;
@@ -307,9 +310,9 @@ export function reconstructHistorySegments(
       });
     }
   } else {
-    changes.forEach((change, index) => {
+    coalescedChanges.forEach((change, index) => {
       const level = resolveLevel(change.value, options, issues, change.sourceIndex);
-      if (index === changes.length - 1) {
+      if (index === coalescedChanges.length - 1) {
         currentValue = change.value;
         currentLevel = level;
       }
@@ -317,7 +320,7 @@ export function reconstructHistorySegments(
 
       segments.push({
         start: change.date,
-        end: changes[index + 1]?.date ?? today,
+        end: coalescedChanges[index + 1]?.date ?? today,
         value: change.value,
         level,
         color: resolveColor(level, options, issues, change.sourceIndex),

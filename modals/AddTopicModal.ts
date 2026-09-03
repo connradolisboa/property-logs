@@ -66,7 +66,7 @@ class NewNoteModal extends Modal {
       .setName("Folder")
       .setDesc("Leave blank for the vault root.")
       .addText((text) => text
-        .setPlaceholder("Topics")
+        .setPlaceholder("Notes")
         .setValue(this.folder)
         .onChange((value) => {
           this.folder = value;
@@ -114,7 +114,7 @@ export class AddTopicModal extends Modal {
   }
 
   onOpen(): void {
-    this.titleEl.setText("Add topic");
+    this.titleEl.setText("Add note");
     this.contentEl.createEl("p", {
       text: `Add a note to ${this.dashboard.name}. Its scope rules still determine whether it appears.`,
       cls: "setting-item-description",

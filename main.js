@@ -144,9 +144,10 @@ function createDashboardSettings(id, name = "Dashboard") {
       excludedProperties: [...EMPTY_SCOPE.excludedProperties]
     },
     rowProperties: [],
-    groupBy: "none",
+    groupBy: "status",
     sortBy: "alphabetical",
-    sortAscending: true
+    sortAscending: true,
+    noteOpenGesture: "ctrl-click"
   };
 }
 function normalizeDashboardSettings(raw, fallbackId, fallbackName) {
@@ -155,7 +156,7 @@ function normalizeDashboardSettings(raw, fallbackId, fallbackName) {
   const value = raw;
   const rawScope = value.scopeFilter && typeof value.scopeFilter === "object" && !Array.isArray(value.scopeFilter) ? value.scopeFilter : {};
   const rawLevelColors = stringMap(value.levelColors);
-  const groupBy = typeof value.groupBy === "string" && (value.groupBy === "none" || value.groupBy === "folder" || value.groupBy === "level" || value.groupBy.startsWith("property:")) ? value.groupBy : defaults2.groupBy;
+  const groupBy = typeof value.groupBy === "string" && (value.groupBy === "status" || value.groupBy === "none" || value.groupBy === "folder" || value.groupBy === "level" || value.groupBy.startsWith("property:")) ? value.groupBy : defaults2.groupBy;
   const sortBy = typeof value.sortBy === "string" && (value.sortBy === "alphabetical" || value.sortBy === "level" || value.sortBy === "recent" || value.sortBy.startsWith("property:")) ? value.sortBy : defaults2.sortBy;
   return {
     id: typeof value.id === "string" && value.id ? value.id : defaults2.id,
@@ -190,7 +191,8 @@ function normalizeDashboardSettings(raw, fallbackId, fallbackName) {
     rowProperties: strings(value.rowProperties),
     groupBy,
     sortBy,
-    sortAscending: typeof value.sortAscending === "boolean" ? value.sortAscending : true
+    sortAscending: typeof value.sortAscending === "boolean" ? value.sortAscending : true,
+    noteOpenGesture: value.noteOpenGesture === "click" ? "click" : "ctrl-click"
   };
 }
 function folderMatches(path2, folders) {
@@ -589,13 +591,17 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
   renderStringList(excluded, "Tags", "Excluded tags take priority.", "hidden", scope.excludedTags, save);
   renderPropertyRules(excluded, "Properties", "Any matching rule excludes the note.", scope.excludedProperties, save);
   container.createEl("h3", { text: "Rows and toolbar" });
+  new import_obsidian2.Setting(container).setName("Open note from timeline block").setDesc("The other gesture opens the status value picker, so both actions remain available.").addDropdown((dropdown) => dropdown.addOption("ctrl-click", "Ctrl-click opens note; click changes value").addOption("click", "Click opens note; Ctrl-click changes value").setValue(dashboard.noteOpenGesture).onChange(async (value) => {
+    dashboard.noteOpenGesture = value === "click" ? "click" : "ctrl-click";
+    await save();
+  }));
   new import_obsidian2.Setting(container).setName("Properties beside note title").setDesc("Comma-separated frontmatter or history-entry keys. History keys show their latest value.").addText((text) => text.setPlaceholder("owner, tags, priority").setValue(dashboard.rowProperties.join(", ")).onChange(async (value) => {
     dashboard.rowProperties = value.split(",").map((key) => key.trim()).filter(Boolean);
     await save();
   }));
-  new import_obsidian2.Setting(container).setName("Default group").setDesc("Use none, folder, level, or property:<key>. The dashboard toolbar can change this later.").addText((text) => text.setPlaceholder("none or property:area").setValue(dashboard.groupBy).onChange(async (value) => {
+  new import_obsidian2.Setting(container).setName("Default group").setDesc("Use status, none, folder, level, or property:<key>. Status creates stacked note bars inside status rows.").addText((text) => text.setPlaceholder("status or property:area").setValue(dashboard.groupBy).onChange(async (value) => {
     const trimmed = value.trim();
-    dashboard.groupBy = trimmed === "folder" || trimmed === "level" || trimmed.startsWith("property:") ? trimmed : "none";
+    dashboard.groupBy = trimmed === "status" || trimmed === "folder" || trimmed === "level" || trimmed.startsWith("property:") ? trimmed : "none";
     await save();
   }));
   new import_obsidian2.Setting(container).setName("Default sort").setDesc("Use alphabetical, level, recent, or property:<key>.").addText((text) => text.setPlaceholder("alphabetical or property:priority").setValue(dashboard.sortBy).onChange(async (value) => {
@@ -38991,6 +38997,9 @@ function reconstructHistorySegments(options) {
   changes.sort(
     (a, b) => a.date.getTime() - b.date.getTime() || a.sourceIndex - b.sourceIndex
   );
+  const coalescedChanges = changes.filter(
+    (change, index) => index === 0 || change.value !== changes[index - 1].value
+  );
   const segments = [];
   let currentValue = null;
   let currentLevel = options.defaultLevelForUnset;
@@ -39007,16 +39016,16 @@ function reconstructHistorySegments(options) {
       });
     }
   } else {
-    changes.forEach((change, index) => {
+    coalescedChanges.forEach((change, index) => {
       const level2 = resolveLevel(change.value, options, issues, change.sourceIndex);
-      if (index === changes.length - 1) {
+      if (index === coalescedChanges.length - 1) {
         currentValue = change.value;
         currentLevel = level2;
       }
       if (level2 === 0) return;
       segments.push({
         start: change.date,
-        end: changes[index + 1]?.date ?? today,
+        end: coalescedChanges[index + 1]?.date ?? today,
         value: change.value,
         level: level2,
         color: resolveColor(level2, options, issues, change.sourceIndex),
@@ -39161,7 +39170,7 @@ var NewNoteModal = class extends import_obsidian4.Modal {
       });
       window.setTimeout(() => text.inputEl.focus(), 50);
     });
-    new import_obsidian4.Setting(this.contentEl).setName("Folder").setDesc("Leave blank for the vault root.").addText((text) => text.setPlaceholder("Topics").setValue(this.folder).onChange((value) => {
+    new import_obsidian4.Setting(this.contentEl).setName("Folder").setDesc("Leave blank for the vault root.").addText((text) => text.setPlaceholder("Notes").setValue(this.folder).onChange((value) => {
       this.folder = value;
     }));
     new import_obsidian4.Setting(this.contentEl).addButton((button) => button.setButtonText("Create").setCta().onClick(() => this.create())).addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()));
@@ -39196,7 +39205,7 @@ var AddTopicModal = class extends import_obsidian4.Modal {
     this.dashboard = dashboard;
   }
   onOpen() {
-    this.titleEl.setText("Add topic");
+    this.titleEl.setText("Add note");
     this.contentEl.createEl("p", {
       text: `Add a note to ${this.dashboard.name}. Its scope rules still determine whether it appears.`,
       cls: "setting-item-description"
@@ -39295,6 +39304,7 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
     this.timeline = null;
     this.renderToken = 0;
     this.refreshTimer = null;
+    this.lastBlockActivation = null;
   }
   getViewType() {
     return TIMELINE_VIEW_TYPE;
@@ -39438,6 +39448,7 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
       toolbar.createDiv({ text: dashboard.name, cls: "property-logs-toolbar-title" });
     }
     this.createModeSelect(toolbar, "Group by", dashboard.groupBy, [
+      ["status", "Status"],
       ["none", "No grouping"],
       ["folder", "Folder"],
       ["level", "Current level"],
@@ -39478,12 +39489,55 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
       await this.host.save();
       this.refresh();
     });
+    this.renderTimelineControls(toolbar);
     const add = toolbar.createEl("button", {
-      text: "Add topic",
+      text: "Add note",
       cls: "mod-cta property-logs-add-topic",
       attr: { type: "button" }
     });
     add.addEventListener("click", () => new AddTopicModal(this.app, this.host, dashboard).open());
+  }
+  renderTimelineControls(toolbar) {
+    const controls = toolbar.createDiv({ cls: "property-logs-timeline-controls" });
+    const zoomOut = controls.createEl("button", {
+      cls: "clickable-icon",
+      attr: { type: "button", "aria-label": "Zoom out", title: "Zoom out" }
+    });
+    (0, import_obsidian5.setIcon)(zoomOut, "zoom-out");
+    zoomOut.addEventListener("click", () => {
+      this.timeline?.zoomOut(0.35, this.timelineAnimation());
+    });
+    const today = controls.createEl("button", {
+      cls: "property-logs-today-button",
+      attr: { type: "button", "aria-label": "Center today", title: "Center today" }
+    });
+    (0, import_obsidian5.setIcon)(today, "calendar-days");
+    today.createSpan({ text: "Today" });
+    today.addEventListener("click", () => this.centerToday());
+    const zoomIn = controls.createEl("button", {
+      cls: "clickable-icon",
+      attr: { type: "button", "aria-label": "Zoom in", title: "Zoom in" }
+    });
+    (0, import_obsidian5.setIcon)(zoomIn, "zoom-in");
+    zoomIn.addEventListener("click", () => {
+      this.timeline?.zoomIn(0.35, this.timelineAnimation());
+    });
+  }
+  timelineAnimation() {
+    return {
+      animation: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? false : { duration: 180, easingFunction: "easeInOutQuad" }
+    };
+  }
+  centerToday(animate = true) {
+    if (!this.timeline) return;
+    const visible = this.timeline.getWindow();
+    const duration = visible.end.getTime() - visible.start.getTime();
+    const center = Date.now();
+    this.timeline.setWindow(
+      new Date(center - duration / 2),
+      new Date(center + duration / 2),
+      animate ? this.timelineAnimation() : { animation: false }
+    );
   }
   createModeSelect(toolbar, label, value, options, onChange) {
     const wrapper = toolbar.createEl("label", { cls: "property-logs-toolbar-field" });
@@ -39500,74 +39554,83 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
     const timelineEl = this.contentEl.createDiv({ cls: "property-logs-timeline" });
     const items = [];
     const groups = [];
+    const itemRows = /* @__PURE__ */ new Map();
     const sortedRows = [...rows].sort((first, second) => compareRows(first, second, dashboard));
-    const buckets = /* @__PURE__ */ new Map();
-    if (dashboard.groupBy === "none") {
-      buckets.set("", sortedRows);
-    } else {
+    if (dashboard.groupBy === "status") {
+      const statusBuckets = /* @__PURE__ */ new Map();
       sortedRows.forEach((row) => {
-        const key = rowGroupValue(row, dashboard);
-        const bucket = buckets.get(key) ?? [];
-        bucket.push(row);
-        buckets.set(key, bucket);
-      });
-    }
-    let order = 0;
-    Array.from(buckets.entries()).sort(([first], [second]) => compareText(first, second)).forEach(([bucket, bucketRows]) => {
-      const childIds = [];
-      if (dashboard.groupBy !== "none") {
-        const parentId = `bucket:${bucket}`;
-        bucketRows.forEach((row) => childIds.push(`note:${row.file.path}`));
-        groups.push({
-          id: parentId,
-          content: bucket,
-          nestedGroups: childIds,
-          showNested: true,
-          className: "property-logs-group-header",
-          order: order++
+        row.parsed.segments.forEach((segment, segmentIndex) => {
+          const status = segment.value ?? "Unset";
+          const bucket = statusBuckets.get(status) ?? {
+            level: segment.level,
+            notes: /* @__PURE__ */ new Set(),
+            segments: []
+          };
+          bucket.level = Math.max(bucket.level, segment.level);
+          bucket.notes.add(row.file.path);
+          bucket.segments.push({ row, segment, segmentIndex });
+          statusBuckets.set(status, bucket);
         });
-      }
-      bucketRows.forEach((row) => {
-        const groupId = `note:${row.file.path}`;
+      });
+      Array.from(statusBuckets.entries()).sort(
+        ([firstStatus, first], [secondStatus, second]) => first.level - second.level || compareText(firstStatus, secondStatus)
+      ).forEach(([status, bucket], order) => {
+        const groupId = `status:${status}`;
         groups.push({
           id: groupId,
-          content: this.createRowLabel(row, dashboard),
-          className: row.parsed.malformed ? "property-logs-row-malformed" : "property-logs-row",
-          order: order++
+          content: this.createStatusLabel(status, bucket.notes.size),
+          className: "property-logs-status-group",
+          order
         });
-        row.parsed.segments.forEach((segment, segmentIndex) => {
-          const content = document.createElement("button");
-          content.type = "button";
-          content.className = "property-logs-segment-button";
-          content.textContent = segment.value ?? "Unset";
-          content.title = `${localDate(segment.start)} \u2013 ${localDate(segment.end)}`;
-          content.setAttribute(
-            "aria-label",
-            `${row.file.basename}: ${segment.value ?? "unset"}, level ${segment.level}. Change value.`
-          );
-          content.addEventListener("click", (event2) => {
-            event2.stopPropagation();
-            openValuePicker(this.host, row.file, dashboard);
+        bucket.segments.forEach(({ row, segment, segmentIndex }) => {
+          this.addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId);
+        });
+      });
+    } else {
+      const buckets = /* @__PURE__ */ new Map();
+      if (dashboard.groupBy === "none") {
+        buckets.set("", sortedRows);
+      } else {
+        sortedRows.forEach((row) => {
+          const key = rowGroupValue(row, dashboard);
+          const bucket = buckets.get(key) ?? [];
+          bucket.push(row);
+          buckets.set(key, bucket);
+        });
+      }
+      let order = 0;
+      Array.from(buckets.entries()).sort(([first], [second]) => compareText(first, second)).forEach(([bucket, bucketRows]) => {
+        const childIds = [];
+        if (dashboard.groupBy !== "none") {
+          const parentId = `bucket:${bucket}`;
+          bucketRows.forEach((row) => childIds.push(`note:${row.file.path}`));
+          groups.push({
+            id: parentId,
+            content: bucket,
+            nestedGroups: childIds,
+            showNested: true,
+            className: "property-logs-group-header",
+            order: order++
           });
-          const end = segment.end.getTime() <= segment.start.getTime() ? addOneDay(segment.start) : segment.end;
-          items.push({
-            id: `${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`,
-            group: groupId,
-            start: segment.start,
-            end,
-            type: "range",
-            content,
-            selectable: false,
-            editable: false,
-            className: "property-logs-segment",
-            style: timelineColorStyle(segment.color)
+        }
+        bucketRows.forEach((row) => {
+          const groupId = `note:${row.file.path}`;
+          groups.push({
+            id: groupId,
+            content: this.createRowLabel(row, dashboard),
+            className: row.parsed.malformed ? "property-logs-row-malformed" : "property-logs-row",
+            order: order++
+          });
+          row.parsed.segments.forEach((segment, segmentIndex) => {
+            this.addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId);
           });
         });
       });
-    });
+    }
     const today = /* @__PURE__ */ new Date();
-    const windowStart = new Date(today.getFullYear(), today.getMonth() - 3, today.getDate());
-    const windowEnd = addOneDay(today);
+    const initialWindowDuration = 1e3 * 60 * 60 * 24 * 90;
+    const windowStart = new Date(today.getTime() - initialWindowDuration / 2);
+    const windowEnd = new Date(today.getTime() + initialWindowDuration / 2);
     const options = {
       autoResize: true,
       width: "100%",
@@ -39577,22 +39640,117 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
       itemsAlwaysDraggable: false,
       selectable: false,
       multiselect: false,
-      stack: false,
+      align: "auto",
+      stack: true,
+      stackSubgroups: true,
       orientation: { axis: "top", item: "top" },
       showCurrentTime: true,
       showTooltips: false,
       horizontalScroll: true,
       verticalScroll: true,
       moveable: true,
-      zoomable: true,
+      zoomable: false,
       zoomMin: 1e3 * 60 * 60 * 24 * 7,
       zoomMax: 1e3 * 60 * 60 * 24 * 365 * 20,
-      margin: { item: { horizontal: 0, vertical: 8 }, axis: 8 },
+      margin: { item: { horizontal: 0, vertical: 4 }, axis: 8 },
       groupOrder: (first, second) => (first.order ?? 0) - (second.order ?? 0)
     };
     this.timeline = new Timeline(timelineEl, items, groups, options);
+    this.timeline.on("click", (properties) => {
+      if (properties.item === null || properties.item === void 0) return;
+      const row = itemRows.get(String(properties.item));
+      if (row) this.activateTimelineBlock(row, dashboard, properties.event);
+    });
+    this.timeline.on("contextmenu", (properties) => {
+      if (!this.isCtrlGesture(properties.event)) return;
+      properties.event.preventDefault();
+      if (properties.item === null || properties.item === void 0) return;
+      const row = itemRows.get(String(properties.item));
+      if (row) this.activateTimelineBlock(row, dashboard, properties.event);
+    });
     this.timeline.setWindow(windowStart, windowEnd, { animation: false });
-    window.requestAnimationFrame(() => this.timeline?.redraw());
+    const initialTimeline = this.timeline;
+    window.requestAnimationFrame(() => {
+      if (this.timeline !== initialTimeline) return;
+      this.timeline.redraw();
+      this.centerToday(false);
+    });
+  }
+  addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId) {
+    const id = `${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`;
+    const end = segment.end.getTime() <= segment.start.getTime() ? addOneDay(segment.start) : segment.end;
+    items.push({
+      id,
+      group: groupId,
+      start: segment.start,
+      end,
+      type: "range",
+      align: "auto",
+      content: this.createSegmentContent(row, dashboard, segment),
+      selectable: false,
+      editable: false,
+      className: "property-logs-segment",
+      style: timelineColorStyle(segment.color)
+    });
+    itemRows.set(id, row);
+  }
+  createStatusLabel(status, noteCount) {
+    const label = document.createElement("div");
+    label.className = "property-logs-status-label";
+    label.createSpan({ text: status, cls: "property-logs-status-name" });
+    label.createSpan({
+      text: String(noteCount),
+      cls: "property-logs-status-count",
+      attr: { "aria-label": `${noteCount} ${noteCount === 1 ? "note" : "notes"}` }
+    });
+    return label;
+  }
+  createSegmentContent(row, dashboard, segment) {
+    const content = document.createElement("button");
+    content.type = "button";
+    content.className = "property-logs-segment-button";
+    const primaryAction = dashboard.noteOpenGesture === "click" ? "Click to open note; Ctrl-click to change value." : "Click to change value; Ctrl-click to open note.";
+    content.title = `${row.file.basename} \u2014 ${segment.value ?? "Unset"} \u2014 ${localDate(segment.start)} to ${localDate(segment.end)}. ${primaryAction}`;
+    content.setAttribute(
+      "aria-label",
+      `${row.file.basename}: ${segment.value ?? "unset"}, level ${segment.level}. ${primaryAction}`
+    );
+    content.createSpan({ text: row.file.basename, cls: "property-logs-segment-title" });
+    dashboard.rowProperties.forEach((key) => {
+      const value = displayPropertyValue(
+        Object.prototype.hasOwnProperty.call(row.frontmatter, key) ? row.frontmatter[key] : latestHistoryValue(row.history, key, this.host.getDashboardDateKey())
+      );
+      if (value) content.createSpan({ text: value, cls: "property-logs-segment-meta" });
+    });
+    content.addEventListener("click", (event2) => {
+      event2.stopPropagation();
+      this.activateTimelineBlock(row, dashboard, event2);
+    });
+    content.addEventListener("contextmenu", (event2) => {
+      if (!event2.ctrlKey) return;
+      event2.preventDefault();
+      event2.stopPropagation();
+      this.activateTimelineBlock(row, dashboard, event2);
+    });
+    return content;
+  }
+  isCtrlGesture(event2) {
+    const direct = event2;
+    const source = event2.srcEvent;
+    return Boolean(direct.ctrlKey || source?.ctrlKey);
+  }
+  activateTimelineBlock(row, dashboard, event2) {
+    const gesture = this.isCtrlGesture(event2) ? "ctrl-click" : "click";
+    const opensNote = dashboard.noteOpenGesture === gesture;
+    const activationKey = `${row.file.path}:${opensNote ? "open" : "edit"}`;
+    const now2 = Date.now();
+    if (this.lastBlockActivation?.key === activationKey && now2 - this.lastBlockActivation.at < 250) return;
+    this.lastBlockActivation = { key: activationKey, at: now2 };
+    if (opensNote) {
+      void this.app.workspace.getLeaf(false).openFile(row.file);
+    } else {
+      openValuePicker(this.host, row.file, dashboard);
+    }
   }
   createRowLabel(row, dashboard) {
     const label = document.createElement("div");
@@ -39638,12 +39796,12 @@ var TimelineDashboardView = class extends import_obsidian5.ItemView {
   }
   renderEmptyState(dashboard) {
     const empty = this.contentEl.createDiv({ cls: "property-logs-empty-state" });
-    empty.createEl("h3", { text: "No visible topics" });
+    empty.createEl("h3", { text: "No visible notes" });
     empty.createEl("p", {
-      text: dashboard.trackedPropertyKey.trim() ? "Add a topic or adjust this dashboard's scope and level mappings." : "Choose a tracked frontmatter property in this dashboard's settings."
+      text: dashboard.trackedPropertyKey.trim() ? "Add a note or adjust this dashboard's scope and level mappings." : "Choose a tracked frontmatter property in this dashboard's settings."
     });
     if (dashboard.trackedPropertyKey.trim()) {
-      const button = empty.createEl("button", { text: "Add topic", cls: "mod-cta" });
+      const button = empty.createEl("button", { text: "Add note", cls: "mod-cta" });
       button.addEventListener("click", () => new AddTopicModal(this.app, this.host, dashboard).open());
     }
   }

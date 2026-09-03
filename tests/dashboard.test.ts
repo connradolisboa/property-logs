@@ -11,6 +11,8 @@ import { DEFAULT_LEVEL_COLORS, DEFAULT_PROPERTY_COLOR } from "../data/colorPalet
 test("new dashboards do not share mutable scope arrays", () => {
   const first = createDashboardSettings("first");
   const second = createDashboardSettings("second");
+  assert.equal(first.groupBy, "status");
+  assert.equal(first.noteOpenGesture, "ctrl-click");
   first.scopeFilter.includedFolders.push("Projects");
   assert.deepEqual(second.scopeFilter.includedFolders, []);
 });
@@ -47,6 +49,15 @@ test("migrates blank colors to the adaptive palette and preserves legacy hex", (
   assert.equal(dashboard.levelColors[3], "palette:purple");
   assert.equal(dashboard.colorPropertyMap.work, DEFAULT_PROPERTY_COLOR);
   assert.equal(dashboard.colorPropertyMap.home, "palette:teal");
+});
+
+test("accepts status as a persisted grouping mode", () => {
+  const dashboard = normalizeDashboardSettings({
+    groupBy: "status",
+    noteOpenGesture: "click",
+  }, "status", "Status");
+  assert.equal(dashboard.groupBy, "status");
+  assert.equal(dashboard.noteOpenGesture, "click");
 });
 
 test("scope exclusions win over matching inclusions", () => {

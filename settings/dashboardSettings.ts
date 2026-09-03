@@ -426,6 +426,18 @@ function renderDashboardEditor(
 
   container.createEl("h3", { text: "Rows and toolbar" });
   new Setting(container)
+    .setName("Open note from timeline block")
+    .setDesc("The other gesture opens the status value picker, so both actions remain available.")
+    .addDropdown((dropdown) => dropdown
+      .addOption("ctrl-click", "Ctrl-click opens note; click changes value")
+      .addOption("click", "Click opens note; Ctrl-click changes value")
+      .setValue(dashboard.noteOpenGesture)
+      .onChange(async (value) => {
+        dashboard.noteOpenGesture = value === "click" ? "click" : "ctrl-click";
+        await save();
+      }));
+
+  new Setting(container)
     .setName("Properties beside note title")
     .setDesc("Comma-separated frontmatter or history-entry keys. History keys show their latest value.")
     .addText((text) => text
@@ -438,13 +450,13 @@ function renderDashboardEditor(
 
   new Setting(container)
     .setName("Default group")
-    .setDesc("Use none, folder, level, or property:<key>. The dashboard toolbar can change this later.")
+    .setDesc("Use status, none, folder, level, or property:<key>. Status creates stacked note bars inside status rows.")
     .addText((text) => text
-      .setPlaceholder("none or property:area")
+      .setPlaceholder("status or property:area")
       .setValue(dashboard.groupBy)
       .onChange(async (value) => {
         const trimmed = value.trim();
-        dashboard.groupBy = trimmed === "folder" || trimmed === "level" || trimmed.startsWith("property:")
+        dashboard.groupBy = trimmed === "status" || trimmed === "folder" || trimmed === "level" || trimmed.startsWith("property:")
           ? trimmed as DashboardSettings["groupBy"]
           : "none";
         await save();

@@ -8,6 +8,8 @@ import {
 } from "obsidian";
 import {
   Timeline,
+  TimelineAnimationOptions,
+  TimelineEventPropertiesResult,
   TimelineGroup,
   TimelineItem,
   TimelineOptions,
@@ -21,6 +23,7 @@ import { timelineColorStyle } from "../data/colorPalette";
 import {
   HistoryParserResult,
   TimelineLevel,
+  TimelineSegment,
   reconstructHistorySegments,
 } from "../data/historyParser";
 import { collectCompatibleHistory } from "../data/historyCompatibility";
@@ -140,6 +143,7 @@ export class TimelineDashboardView extends ItemView {
   private timeline: Timeline | null = null;
   private renderToken = 0;
   private refreshTimer: number | null = null;
+  private lastBlockActivation: { key: string; at: number } | null = null;
 
   constructor(leaf: WorkspaceLeaf, private readonly host: TimelineViewHost) {
     super(leaf);
@@ -311,6 +315,7 @@ export class TimelineDashboardView extends ItemView {
     }
 
     this.createModeSelect(toolbar, "Group by", dashboard.groupBy, [
+      ["status", "Status"],
       ["none", "No grouping"],
       ["folder", "Folder"],
       ["level", "Current level"],
@@ -355,12 +360,63 @@ export class TimelineDashboardView extends ItemView {
       this.refresh();
     });
 
+    this.renderTimelineControls(toolbar);
+
     const add = toolbar.createEl("button", {
-      text: "Add topic",
+      text: "Add note",
       cls: "mod-cta property-logs-add-topic",
       attr: { type: "button" },
     });
     add.addEventListener("click", () => new AddTopicModal(this.app, this.host, dashboard).open());
+  }
+
+  private renderTimelineControls(toolbar: HTMLElement): void {
+    const controls = toolbar.createDiv({ cls: "property-logs-timeline-controls" });
+    const zoomOut = controls.createEl("button", {
+      cls: "clickable-icon",
+      attr: { type: "button", "aria-label": "Zoom out", title: "Zoom out" },
+    });
+    setIcon(zoomOut, "zoom-out");
+    zoomOut.addEventListener("click", () => {
+      this.timeline?.zoomOut(0.35, this.timelineAnimation());
+    });
+
+    const today = controls.createEl("button", {
+      cls: "property-logs-today-button",
+      attr: { type: "button", "aria-label": "Center today", title: "Center today" },
+    });
+    setIcon(today, "calendar-days");
+    today.createSpan({ text: "Today" });
+    today.addEventListener("click", () => this.centerToday());
+
+    const zoomIn = controls.createEl("button", {
+      cls: "clickable-icon",
+      attr: { type: "button", "aria-label": "Zoom in", title: "Zoom in" },
+    });
+    setIcon(zoomIn, "zoom-in");
+    zoomIn.addEventListener("click", () => {
+      this.timeline?.zoomIn(0.35, this.timelineAnimation());
+    });
+  }
+
+  private timelineAnimation(): TimelineAnimationOptions {
+    return {
+      animation: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? false
+        : { duration: 180, easingFunction: "easeInOutQuad" },
+    };
+  }
+
+  private centerToday(animate = true): void {
+    if (!this.timeline) return;
+    const visible = this.timeline.getWindow();
+    const duration = visible.end.getTime() - visible.start.getTime();
+    const center = Date.now();
+    this.timeline.setWindow(
+      new Date(center - duration / 2),
+      new Date(center + duration / 2),
+      animate ? this.timelineAnimation() : { animation: false }
+    );
   }
 
   private createModeSelect(
@@ -385,79 +441,95 @@ export class TimelineDashboardView extends ItemView {
     const timelineEl = this.contentEl.createDiv({ cls: "property-logs-timeline" });
     const items: TimelineItem[] = [];
     const groups: TimelineGroup[] = [];
+    const itemRows = new Map<string, TimelineRow>();
     const sortedRows = [...rows].sort((first, second) => compareRows(first, second, dashboard));
-    const buckets = new Map<string, TimelineRow[]>();
-    if (dashboard.groupBy === "none") {
-      buckets.set("", sortedRows);
-    } else {
+    if (dashboard.groupBy === "status") {
+      const statusBuckets = new Map<string, {
+        level: TimelineLevel;
+        notes: Set<string>;
+        segments: Array<{ row: TimelineRow; segment: TimelineSegment; segmentIndex: number }>;
+      }>();
       sortedRows.forEach((row) => {
-        const key = rowGroupValue(row, dashboard);
-        const bucket = buckets.get(key) ?? [];
-        bucket.push(row);
-        buckets.set(key, bucket);
+        row.parsed.segments.forEach((segment, segmentIndex) => {
+          const status = segment.value ?? "Unset";
+          const bucket = statusBuckets.get(status) ?? {
+            level: segment.level,
+            notes: new Set<string>(),
+            segments: [],
+          };
+          bucket.level = Math.max(bucket.level, segment.level) as TimelineLevel;
+          bucket.notes.add(row.file.path);
+          bucket.segments.push({ row, segment, segmentIndex });
+          statusBuckets.set(status, bucket);
+        });
       });
-    }
 
-    let order = 0;
-    Array.from(buckets.entries()).sort(([first], [second]) => compareText(first, second)).forEach(([bucket, bucketRows]) => {
-      const childIds: string[] = [];
-      if (dashboard.groupBy !== "none") {
-        const parentId = `bucket:${bucket}`;
-        bucketRows.forEach((row) => childIds.push(`note:${row.file.path}`));
-        groups.push({
-          id: parentId,
-          content: bucket,
-          nestedGroups: childIds,
-          showNested: true,
-          className: "property-logs-group-header",
-          order: order++,
+      Array.from(statusBuckets.entries())
+        .sort(([firstStatus, first], [secondStatus, second]) =>
+          first.level - second.level || compareText(firstStatus, secondStatus)
+        )
+        .forEach(([status, bucket], order) => {
+          const groupId = `status:${status}`;
+          groups.push({
+            id: groupId,
+            content: this.createStatusLabel(status, bucket.notes.size),
+            className: "property-logs-status-group",
+            order,
+          });
+          bucket.segments.forEach(({ row, segment, segmentIndex }) => {
+            this.addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId);
+          });
+        });
+    } else {
+      const buckets = new Map<string, TimelineRow[]>();
+      if (dashboard.groupBy === "none") {
+        buckets.set("", sortedRows);
+      } else {
+        sortedRows.forEach((row) => {
+          const key = rowGroupValue(row, dashboard);
+          const bucket = buckets.get(key) ?? [];
+          bucket.push(row);
+          buckets.set(key, bucket);
         });
       }
 
-      bucketRows.forEach((row) => {
-        const groupId = `note:${row.file.path}`;
-        groups.push({
-          id: groupId,
-          content: this.createRowLabel(row, dashboard),
-          className: row.parsed.malformed ? "property-logs-row-malformed" : "property-logs-row",
-          order: order++,
-        });
-        row.parsed.segments.forEach((segment, segmentIndex) => {
-          const content = document.createElement("button");
-          content.type = "button";
-          content.className = "property-logs-segment-button";
-          content.textContent = segment.value ?? "Unset";
-          content.title = `${localDate(segment.start)} – ${localDate(segment.end)}`;
-          content.setAttribute(
-            "aria-label",
-            `${row.file.basename}: ${segment.value ?? "unset"}, level ${segment.level}. Change value.`
-          );
-          content.addEventListener("click", (event) => {
-            event.stopPropagation();
-            openValuePicker(this.host, row.file, dashboard);
+      let order = 0;
+      Array.from(buckets.entries()).sort(([first], [second]) => compareText(first, second)).forEach(([bucket, bucketRows]) => {
+        const childIds: string[] = [];
+        if (dashboard.groupBy !== "none") {
+          const parentId = `bucket:${bucket}`;
+          bucketRows.forEach((row) => childIds.push(`note:${row.file.path}`));
+          groups.push({
+            id: parentId,
+            content: bucket,
+            nestedGroups: childIds,
+            showNested: true,
+            className: "property-logs-group-header",
+            order: order++,
           });
-          const end = segment.end.getTime() <= segment.start.getTime()
-            ? addOneDay(segment.start)
-            : segment.end;
-          items.push({
-            id: `${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`,
-            group: groupId,
-            start: segment.start,
-            end,
-            type: "range",
-            content,
-            selectable: false,
-            editable: false,
-            className: "property-logs-segment",
-            style: timelineColorStyle(segment.color),
+        }
+
+        bucketRows.forEach((row) => {
+          const groupId = `note:${row.file.path}`;
+          groups.push({
+            id: groupId,
+            content: this.createRowLabel(row, dashboard),
+            className: row.parsed.malformed ? "property-logs-row-malformed" : "property-logs-row",
+            order: order++,
+          });
+          row.parsed.segments.forEach((segment, segmentIndex) => {
+            this.addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId);
           });
         });
       });
-    });
+    }
 
     const today = new Date();
-    const windowStart = new Date(today.getFullYear(), today.getMonth() - 3, today.getDate());
-    const windowEnd = addOneDay(today);
+    // Dashboard-control changes rebuild the timeline. Start each rebuilt view
+    // centered on today so a group/sort/color change does not pin today to an edge.
+    const initialWindowDuration = 1000 * 60 * 60 * 24 * 90;
+    const windowStart = new Date(today.getTime() - initialWindowDuration / 2);
+    const windowEnd = new Date(today.getTime() + initialWindowDuration / 2);
     const options: TimelineOptions = {
       autoResize: true,
       width: "100%",
@@ -467,27 +539,156 @@ export class TimelineDashboardView extends ItemView {
       itemsAlwaysDraggable: false,
       selectable: false,
       multiselect: false,
-      stack: false,
+      align: "auto",
+      stack: true,
+      stackSubgroups: true,
       orientation: { axis: "top", item: "top" },
       showCurrentTime: true,
       showTooltips: false,
       horizontalScroll: true,
       verticalScroll: true,
       moveable: true,
-      zoomable: true,
+      zoomable: false,
       zoomMin: 1000 * 60 * 60 * 24 * 7,
       zoomMax: 1000 * 60 * 60 * 24 * 365 * 20,
-      margin: { item: { horizontal: 0, vertical: 8 }, axis: 8 },
+      margin: { item: { horizontal: 0, vertical: 4 }, axis: 8 },
       groupOrder: (first, second) => (first.order ?? 0) - (second.order ?? 0),
     };
     // vis-timeline supports HTMLElement content at runtime, although the standalone
     // constructor's collection alias narrows item content to strings.
     this.timeline = new Timeline(timelineEl, items as any, groups as any, options);
+    this.timeline.on("click", (properties: TimelineEventPropertiesResult) => {
+      if (properties.item === null || properties.item === undefined) return;
+      const row = itemRows.get(String(properties.item));
+      if (row) this.activateTimelineBlock(row, dashboard, properties.event);
+    });
+    this.timeline.on("contextmenu", (properties: TimelineEventPropertiesResult) => {
+      if (!this.isCtrlGesture(properties.event)) return;
+      properties.event.preventDefault();
+      if (properties.item === null || properties.item === undefined) return;
+      const row = itemRows.get(String(properties.item));
+      if (row) this.activateTimelineBlock(row, dashboard, properties.event);
+    });
     // Setting the initial range in the constructor can leave vis-timeline's root
     // hidden when its first range-change event fires before Obsidian lays out the
     // ItemView. Build it visibly first, then apply the desired window.
     this.timeline.setWindow(windowStart, windowEnd, { animation: false });
-    window.requestAnimationFrame(() => this.timeline?.redraw());
+    const initialTimeline = this.timeline;
+    window.requestAnimationFrame(() => {
+      if (this.timeline !== initialTimeline) return;
+      this.timeline.redraw();
+      // vis-timeline can adjust its range during the first visible layout pass.
+      // Recenter after that pass so today stays in the middle on dashboard open
+      // and after rebuilding for dashboard-control changes.
+      this.centerToday(false);
+    });
+  }
+
+  private addSegmentItem(
+    items: TimelineItem[],
+    itemRows: Map<string, TimelineRow>,
+    row: TimelineRow,
+    dashboard: DashboardSettings,
+    segment: TimelineSegment,
+    segmentIndex: number,
+    groupId: string
+  ): void {
+    const id = `${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`;
+    const end = segment.end.getTime() <= segment.start.getTime()
+      ? addOneDay(segment.start)
+      : segment.end;
+    items.push({
+      id,
+      group: groupId,
+      start: segment.start,
+      end,
+      type: "range",
+      align: "auto",
+      content: this.createSegmentContent(row, dashboard, segment),
+      selectable: false,
+      editable: false,
+      className: "property-logs-segment",
+      style: timelineColorStyle(segment.color),
+    });
+    itemRows.set(id, row);
+  }
+
+  private createStatusLabel(status: string, noteCount: number): HTMLElement {
+    const label = document.createElement("div");
+    label.className = "property-logs-status-label";
+    label.createSpan({ text: status, cls: "property-logs-status-name" });
+    label.createSpan({
+      text: String(noteCount),
+      cls: "property-logs-status-count",
+      attr: { "aria-label": `${noteCount} ${noteCount === 1 ? "note" : "notes"}` },
+    });
+    return label;
+  }
+
+  private createSegmentContent(
+    row: TimelineRow,
+    dashboard: DashboardSettings,
+    segment: TimelineSegment
+  ): HTMLElement {
+    const content = document.createElement("button");
+    content.type = "button";
+    content.className = "property-logs-segment-button";
+    const primaryAction = dashboard.noteOpenGesture === "click"
+      ? "Click to open note; Ctrl-click to change value."
+      : "Click to change value; Ctrl-click to open note.";
+    content.title = `${row.file.basename} — ${segment.value ?? "Unset"} — ${localDate(segment.start)} to ${localDate(segment.end)}. ${primaryAction}`;
+    content.setAttribute(
+      "aria-label",
+      `${row.file.basename}: ${segment.value ?? "unset"}, level ${segment.level}. ${primaryAction}`
+    );
+    content.createSpan({ text: row.file.basename, cls: "property-logs-segment-title" });
+    dashboard.rowProperties.forEach((key) => {
+      const value = displayPropertyValue(
+        Object.prototype.hasOwnProperty.call(row.frontmatter, key)
+          ? row.frontmatter[key]
+          : latestHistoryValue(row.history, key, this.host.getDashboardDateKey())
+      );
+      if (value) content.createSpan({ text: value, cls: "property-logs-segment-meta" });
+    });
+    content.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.activateTimelineBlock(row, dashboard, event);
+    });
+    content.addEventListener("contextmenu", (event) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.activateTimelineBlock(row, dashboard, event);
+    });
+    return content;
+  }
+
+  private isCtrlGesture(event: Event): boolean {
+    const direct = event as MouseEvent;
+    const source = (event as Event & { srcEvent?: MouseEvent }).srcEvent;
+    return Boolean(direct.ctrlKey || source?.ctrlKey);
+  }
+
+  private activateTimelineBlock(
+    row: TimelineRow,
+    dashboard: DashboardSettings,
+    event: Event
+  ): void {
+    const gesture = this.isCtrlGesture(event) ? "ctrl-click" : "click";
+    const opensNote = dashboard.noteOpenGesture === gesture;
+    const activationKey = `${row.file.path}:${opensNote ? "open" : "edit"}`;
+    const now = Date.now();
+    if (
+      this.lastBlockActivation?.key === activationKey
+      && now - this.lastBlockActivation.at < 250
+    ) return;
+    this.lastBlockActivation = { key: activationKey, at: now };
+
+    if (opensNote) {
+      void this.app.workspace.getLeaf(false).openFile(row.file);
+    } else {
+      openValuePicker(this.host, row.file, dashboard);
+    }
   }
 
   private createRowLabel(row: TimelineRow, dashboard: DashboardSettings): HTMLElement {
@@ -542,14 +743,14 @@ export class TimelineDashboardView extends ItemView {
 
   private renderEmptyState(dashboard: DashboardSettings): void {
     const empty = this.contentEl.createDiv({ cls: "property-logs-empty-state" });
-    empty.createEl("h3", { text: "No visible topics" });
+    empty.createEl("h3", { text: "No visible notes" });
     empty.createEl("p", {
       text: dashboard.trackedPropertyKey.trim()
-        ? "Add a topic or adjust this dashboard's scope and level mappings."
+        ? "Add a note or adjust this dashboard's scope and level mappings."
         : "Choose a tracked frontmatter property in this dashboard's settings.",
     });
     if (dashboard.trackedPropertyKey.trim()) {
-      const button = empty.createEl("button", { text: "Add topic", cls: "mod-cta" });
+      const button = empty.createEl("button", { text: "Add note", cls: "mod-cta" });
       button.addEventListener("click", () => new AddTopicModal(this.app, this.host, dashboard).open());
     }
   }
