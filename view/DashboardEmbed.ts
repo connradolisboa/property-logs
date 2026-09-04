@@ -35,6 +35,15 @@ export class DashboardEmbed extends MarkdownRenderChild {
 
   async onload(): Promise<void> {
     this.containerEl.addClass("property-logs-embed");
+    // Live Preview renders this block inside the editor, where a mousedown
+    // reaching CodeMirror moves the caret into the code block and unrenders the
+    // dashboard, and a ctrl-click raises the editor's own context menu before a
+    // block sees it. Keeping both gestures inside the embed lets clicking and
+    // ctrl-clicking a block behave the way they do in the full dashboard.
+    this.registerDomEvent(this.containerEl, "mousedown", (event) => event.stopPropagation());
+    this.registerDomEvent(this.containerEl, "contextmenu", (event) => {
+      if (event.ctrlKey) event.stopPropagation();
+    });
     // Virtual Content and collapsed sections can render this block while it is
     // detached or zero-width, which vis-timeline cannot measure. Wait for real
     // width before building, then keep the timeline in sync with the note.

@@ -150,6 +150,7 @@ function createDashboardSettings(id, name = "Dashboard") {
     sortAscending: true,
     noteOpenGesture: "ctrl-click",
     foldedGroups: [],
+    collapsedLabels: false,
     showPeriodAxis: true,
     showJournalNotes: true
   };
@@ -211,6 +212,7 @@ function normalizeDashboardSettings(raw, fallbackId, fallbackName) {
     sortAscending: typeof value.sortAscending === "boolean" ? value.sortAscending : true,
     noteOpenGesture: value.noteOpenGesture === "click" ? "click" : "ctrl-click",
     foldedGroups: strings(value.foldedGroups),
+    collapsedLabels: value.collapsedLabels === true,
     showPeriodAxis: typeof value.showPeriodAxis === "boolean" ? value.showPeriodAxis : true,
     showJournalNotes: typeof value.showJournalNotes === "boolean" ? value.showJournalNotes : true
   };
@@ -40454,6 +40456,10 @@ var DashboardTimeline = class {
     this.lastBlockActivation = null;
     this.timelineEl = null;
     this.dividersEl = null;
+    /** Every fold button currently on screen, kept in step with one another. */
+    this.labelFoldButtons = [];
+    /** Group id → the value shown for it, for drawing into rows when folded. */
+    this.groupLabelText = /* @__PURE__ */ new Map();
   }
   setOptions(options) {
     this.options = { ...this.options, ...options };
@@ -40495,6 +40501,7 @@ var DashboardTimeline = class {
     const token = ++this.renderToken;
     this.destroyTimeline();
     this.containerEl.empty();
+    this.labelFoldButtons = [];
     this.containerEl.addClass("property-logs-dashboard");
     this.containerEl.toggleClass("is-compact", this.options.compact === true);
     this.containerEl.toggleClass("is-minimal", this.options.minimal === true);
@@ -40505,6 +40512,7 @@ var DashboardTimeline = class {
       return;
     }
     this.dashboardId = dashboard.id;
+    this.containerEl.toggleClass("is-labels-collapsed", dashboard.collapsedLabels);
     const header = this.containerEl.createDiv({ cls: "property-logs-toolbar" });
     const loading = this.containerEl.createDiv({ cls: "property-logs-loading" });
     for (let line = 0; line < 3; line++) loading.createDiv({ cls: "property-logs-loading-line" });
@@ -40660,6 +40668,7 @@ var DashboardTimeline = class {
       });
     }
     const controls = header.createDiv({ cls: "property-logs-timeline-controls" });
+    this.createLabelFoldButton(controls, dashboard);
     this.createIconButton(controls, "zoom-out", "Zoom out", () => {
       this.timeline?.zoomOut(0.35, this.timelineAnimation());
     });
@@ -40731,6 +40740,7 @@ var DashboardTimeline = class {
       this.refresh();
     });
     const controls = toolbar.createDiv({ cls: "property-logs-timeline-controls" });
+    this.createLabelFoldButton(controls, dashboard);
     this.createIconButton(controls, "zoom-out", "Zoom out", () => {
       this.timeline?.zoomOut(0.35, this.timelineAnimation());
     });
@@ -40786,6 +40796,33 @@ var DashboardTimeline = class {
     });
     return ids;
   }
+  /** Folds the left label column away, giving the calendar the full width. */
+  createLabelFoldButton(parent, dashboard, cls) {
+    const button = this.createIconButton(parent, "panel-left-close", "Fold labels", () => {
+      dashboard.collapsedLabels = !dashboard.collapsedLabels;
+      this.applyLabelColumn(dashboard);
+      void this.host.save();
+    });
+    if (cls) button.addClass(cls);
+    this.labelFoldButtons.push(button);
+    this.applyLabelColumn(dashboard);
+  }
+  /** Mirrors the folded state onto the container and every fold button on screen. */
+  applyLabelColumn(dashboard) {
+    const collapsed = dashboard.collapsedLabels;
+    this.containerEl.toggleClass("is-labels-collapsed", collapsed);
+    const label = collapsed ? "Unfold labels" : "Fold labels";
+    this.labelFoldButtons.forEach((button) => {
+      button.setAttribute("aria-label", label);
+      button.setAttribute("title", label);
+      (0, import_obsidian8.setIcon)(button, collapsed ? "panel-left-open" : "panel-left-close");
+    });
+    window.requestAnimationFrame(() => {
+      this.timeline?.redraw();
+      this.updateAxis(true);
+      this.syncFloatingLabels();
+    });
+  }
   createIconButton(parent, icon, label, onClick) {
     const button = parent.createEl("button", {
       cls: "clickable-icon",
@@ -40830,6 +40867,9 @@ var DashboardTimeline = class {
   }
   renderTimeline(rows, dashboard, visible) {
     const wrapper = this.containerEl.createDiv({ cls: "property-logs-timeline-wrapper" });
+    if (this.options.showToolbar === false) {
+      this.createLabelFoldButton(wrapper, dashboard, "property-logs-labels-corner-toggle");
+    }
     const axisEl = wrapper.createDiv({ cls: "property-logs-axis" });
     const timelineEl = wrapper.createDiv({ cls: "property-logs-timeline" });
     const dividersEl = wrapper.createDiv({ cls: "property-logs-axis-dividers" });
@@ -40840,6 +40880,7 @@ var DashboardTimeline = class {
     const items = [];
     const groups = [];
     const itemRows = /* @__PURE__ */ new Map();
+    this.groupLabelText.clear();
     const journalItems = /* @__PURE__ */ new Map();
     const noteGroupIds = /* @__PURE__ */ new Map();
     const sortedRows = [...rows].sort((first, second) => compareRows(first, second, dashboard));
@@ -40861,13 +40902,16 @@ var DashboardTimeline = class {
       });
       Array.from(statusBuckets.entries()).sort(([firstStatus, first], [secondStatus, second]) => first.level - second.level || compareText(firstStatus, secondStatus)).forEach(([status, bucket], order) => {
         const groupId = `status:${status}`;
-        const folded = this.isFolded(dashboard, groupId);
+        const foldable = bucket.notes.size > 1;
+        const folded = foldable && this.isFolded(dashboard, groupId);
+        this.groupLabelText.set(groupId, status);
         groups.push({
           id: groupId,
           content: this.createGroupLabel(
             dashboard,
             groupId,
-            this.createStatusLabel(status, bucket.notes.size)
+            this.createStatusLabel(status, bucket.notes.size),
+            foldable
           ),
           className: folded ? "property-logs-status-group is-folded" : "property-logs-status-group",
           order
@@ -40891,12 +40935,15 @@ var DashboardTimeline = class {
       let order = 0;
       Array.from(buckets.entries()).sort(([first], [second]) => compareText(first, second)).forEach(([bucket, bucketRows]) => {
         const parentId = `bucket:${bucket}`;
-        const folded = dashboard.groupBy !== "none" && this.isFolded(dashboard, parentId);
+        const foldable = dashboard.groupBy !== "none" && bucketRows.length > 1;
+        const folded = foldable && this.isFolded(dashboard, parentId);
         if (dashboard.groupBy !== "none") {
+          this.groupLabelText.set(parentId, bucket || "All notes");
           const label = this.createGroupLabel(
             dashboard,
             parentId,
-            this.createBucketLabel(bucket, bucketRows.length)
+            this.createBucketLabel(bucket, bucketRows.length),
+            foldable
           );
           groups.push({
             id: parentId,
@@ -40928,6 +40975,7 @@ var DashboardTimeline = class {
         bucketRows.forEach((row) => {
           const groupId = `note:${row.file.path}`;
           noteGroupIds.set(row.file.path, groupId);
+          this.groupLabelText.set(groupId, row.file.basename);
           groups.push({
             id: groupId,
             content: this.createRowLabel(row, dashboard),
@@ -40969,6 +41017,7 @@ var DashboardTimeline = class {
       const row = itemRows.get(String(properties.item));
       if (row) this.activateTimelineBlock(row, dashboard, properties.event);
     });
+    this.timeline.on("changed", () => this.syncFloatingLabels());
     if (dashboard.showPeriodAxis) {
       this.axis = new PeriodAxis(axisEl, dividersEl, {
         weekStartsOn: this.host.getWeekStartsOn(),
@@ -40989,6 +41038,7 @@ var DashboardTimeline = class {
       this.timeline.redraw();
       this.timeline.setWindow(visible.start, visible.end, { animation: false });
       this.updateAxis();
+      this.syncFloatingLabels();
     });
     this.observeResize(wrapper, initialTimeline);
     return { items, groups, journalItems, noteGroupIds };
@@ -41022,8 +41072,8 @@ var DashboardTimeline = class {
       zoomMin: 1e3 * 60 * 60 * 24 * 7,
       zoomMax: 1e3 * 60 * 60 * 24 * 365 * 20,
       margin: {
-        item: { horizontal: 0, vertical: minimal ? 1 : compact ? 2 : 4 },
-        axis: minimal ? 2 : compact ? 4 : 8
+        item: { horizontal: 0, vertical: minimal ? 1 : compact ? 1 : 2 },
+        axis: minimal ? 2 : compact ? 3 : 5
       },
       groupOrder: (first, second) => (first.order ?? 0) - (second.order ?? 0),
       start: visible.start,
@@ -41040,6 +41090,30 @@ var DashboardTimeline = class {
       this.updateAxis();
     });
     this.resizeObserver.observe(wrapper);
+  }
+  /**
+   * Writes each row's value into the calendar itself, which is the only place
+   * it can go once the label column is folded to nothing: that panel scrolls
+   * vertically, so CSS can never let its contents spill sideways. vis hangs a
+   * reference to the group off its own row element, so the text follows the
+   * right row through every redraw, fold and scroll.
+   */
+  syncFloatingLabels() {
+    if (!this.timelineEl) return;
+    const collapsed = this.containerEl.hasClass("is-labels-collapsed");
+    this.timelineEl.querySelectorAll(".vis-foreground .vis-group").forEach((groupEl) => {
+      const existing = groupEl.querySelector(
+        ":scope > .property-logs-floating-label"
+      );
+      const group = groupEl["vis-group"];
+      const text = collapsed ? this.groupLabelText.get(String(group?.groupId ?? "")) ?? "" : "";
+      if (!text) {
+        existing?.remove();
+        return;
+      }
+      const label = existing ?? groupEl.createDiv({ cls: "property-logs-floating-label" });
+      if (label.textContent !== text) label.setText(text);
+    });
   }
   updateAxis(immediate = false) {
     if (!this.timeline || !this.axis || !this.timelineEl) return;
@@ -41183,7 +41257,13 @@ ${text}`;
     return label;
   }
   /** Wraps a group label with the fold toggle that collapses it into one row. */
-  createGroupLabel(dashboard, groupId, content) {
+  createGroupLabel(dashboard, groupId, content, foldable) {
+    if (!foldable) {
+      const plain = document.createElement("div");
+      plain.className = "property-logs-group-label is-static";
+      plain.appendChild(content);
+      return plain;
+    }
     const folded = this.isFolded(dashboard, groupId);
     const wrapper = document.createElement("div");
     wrapper.className = folded ? "property-logs-group-label is-folded" : "property-logs-group-label";
@@ -41324,6 +41404,10 @@ var DashboardEmbed = class extends import_obsidian9.MarkdownRenderChild {
   }
   async onload() {
     this.containerEl.addClass("property-logs-embed");
+    this.registerDomEvent(this.containerEl, "mousedown", (event2) => event2.stopPropagation());
+    this.registerDomEvent(this.containerEl, "contextmenu", (event2) => {
+      if (event2.ctrlKey) event2.stopPropagation();
+    });
     if (this.containerEl.clientWidth > 0) await this.renderEmbed();
     else this.renderPlaceholder();
     this.observeSize();

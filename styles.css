@@ -1168,8 +1168,9 @@ button.property-logs-palette-swatch:focus-visible {
   display: flex;
   align-items: end;
   flex-wrap: wrap;
-  gap: var(--size-4-2, 8px);
-  padding: var(--size-4-3, 12px);
+  gap: var(--size-4-1, 4px) var(--size-4-2, 8px);
+  padding: var(--size-4-2, 8px);
+  font-size: var(--font-ui-smaller);
   border-bottom: 1px solid var(--background-modifier-border);
   background: var(--background-primary);
   flex: 0 0 auto;
@@ -1185,8 +1186,8 @@ button.property-logs-palette-swatch:focus-visible {
 }
 .property-logs-toolbar-field {
   display: flex;
-  min-width: 8rem;
-  flex: 1 1 9rem;
+  min-width: 6rem;
+  flex: 1 1 7rem;
   flex-direction: column;
   gap: var(--size-4-1, 4px);
   color: var(--text-muted);
@@ -1215,7 +1216,7 @@ button.property-logs-palette-swatch:focus-visible {
   background: var(--background-secondary);
 }
 .property-logs-timeline-controls button {
-  min-height: 1.75rem;
+  min-height: 1.5rem;
 }
 .property-logs-today-button {
   display: inline-flex;
@@ -1244,14 +1245,14 @@ button.property-logs-palette-swatch:focus-visible {
 }
 .property-logs-loading {
   display: flex;
-  min-height: 16rem;
+  min-height: 12rem;
   flex-direction: column;
-  gap: var(--size-4-3, 12px);
-  padding: var(--size-4-4, 16px);
+  gap: var(--size-4-2, 8px);
+  padding: var(--size-4-3, 12px);
   flex: 1 1 auto;
 }
 .property-logs-loading-line {
-  height: 2.25rem;
+  height: 1.75rem;
   border-radius: var(--radius-s, 6px);
   background: var(--background-secondary);
   opacity: 0.7;
@@ -1264,7 +1265,7 @@ button.property-logs-palette-swatch:focus-visible {
 }
 .property-logs-empty-state {
   display: flex;
-  min-height: 16rem;
+  min-height: 12rem;
   align-items: center;
   justify-content: center;
   flex-direction: column;
@@ -1279,7 +1280,7 @@ button.property-logs-palette-swatch:focus-visible {
 }
 .property-logs-timeline {
   height: 0;
-  min-height: 16rem;
+  min-height: 12rem;
   flex: 1 1 0;
   overflow: hidden;
   background: var(--background-primary);
@@ -1291,7 +1292,7 @@ button.property-logs-palette-swatch:focus-visible {
   background: var(--background-primary);
   color: var(--text-normal);
   font-family: var(--font-interface);
-  font-size: var(--font-ui-small);
+  font-size: var(--font-ui-smaller);
 }
 .property-logs-error-state p {
   max-width: 42rem;
@@ -1317,7 +1318,7 @@ button.property-logs-palette-swatch:focus-visible {
   color: var(--text-normal);
 }
 .property-logs-timeline .vis-labelset .vis-label .vis-inner {
-  padding: var(--size-4-2, 8px) var(--size-4-3, 12px);
+  padding: var(--size-4-1, 4px) var(--size-4-2, 8px);
 }
 .property-logs-timeline .vis-label.property-logs-group-header,
 .property-logs-timeline .vis-group.property-logs-group-header {
@@ -1336,10 +1337,10 @@ button.property-logs-palette-swatch:focus-visible {
 }
 .property-logs-status-label {
   display: flex;
-  min-width: 8rem;
+  min-width: 5rem;
   align-items: center;
   justify-content: space-between;
-  gap: var(--size-4-3, 12px);
+  gap: var(--size-4-2, 8px);
 }
 .property-logs-status-name {
   overflow: hidden;
@@ -1348,15 +1349,15 @@ button.property-logs-palette-swatch:focus-visible {
 }
 .property-logs-status-count {
   display: inline-flex;
-  min-width: 1.35rem;
-  height: 1.35rem;
+  min-width: 1.1rem;
+  height: 1.1rem;
   align-items: center;
   justify-content: center;
   padding: 0 var(--size-4-1, 4px);
   border-radius: 999px;
   background: var(--background-modifier-hover);
   color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-size: 0.85em;
   font-weight: var(--font-medium);
 }
 .property-logs-timeline .vis-label.property-logs-row-malformed {
@@ -1406,21 +1407,22 @@ button.property-logs-palette-swatch:focus-visible {
   box-shadow: none;
 }
 .property-logs-timeline .vis-item.property-logs-segment .vis-item-content {
-  max-width: 28rem;
   padding: 0;
+}
+.property-logs-timeline .vis-item.property-logs-segment:not(.is-folded) .vis-item-overflow {
+  overflow: visible;
 }
 .property-logs-segment-button {
   display: flex;
   width: auto;
-  max-width: 28rem;
-  min-height: 1.5rem;
+  min-height: 1.25rem;
   align-items: center;
-  gap: var(--size-4-2, 8px);
+  gap: var(--size-4-1, 4px);
   padding: 0 var(--size-4-2, 8px);
-  overflow: hidden;
+  overflow: visible;
   border: 0;
   border-radius: inherit;
-  background: transparent;
+  background: var(--property-logs-segment-color, var(--interactive-accent));
   color: inherit;
   box-shadow: none;
   font: inherit;
@@ -1432,8 +1434,6 @@ button.property-logs-palette-swatch:focus-visible {
 }
 .property-logs-segment-title,
 .property-logs-segment-meta {
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .property-logs-segment-title {
@@ -1441,7 +1441,7 @@ button.property-logs-palette-swatch:focus-visible {
 }
 .property-logs-segment-meta {
   opacity: 0.78;
-  font-size: var(--font-ui-smaller);
+  font-size: 0.9em;
   font-weight: var(--font-normal);
 }
 .property-logs-timeline .vis-panel.vis-center {
@@ -1453,8 +1453,11 @@ button.property-logs-palette-swatch:focus-visible {
 .property-logs-segment-button:hover,
 .property-logs-segment-button:active {
   border: 0;
-  background: transparent;
+  background: var(--property-logs-segment-color, var(--interactive-accent));
   box-shadow: none;
+}
+.property-logs-segment-button:hover {
+  opacity: 0.88;
 }
 .property-logs-segment-button:active {
   opacity: 0.72;
@@ -1469,10 +1472,10 @@ button.property-logs-palette-swatch:focus-visible {
 }
 .property-logs-row-label {
   display: grid;
-  max-width: 18rem;
+  max-width: 14rem;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--size-4-1, 4px) var(--size-4-2, 8px);
+  gap: 0 var(--size-4-2, 8px);
 }
 .property-logs-row-title {
   min-width: 0;
@@ -1501,7 +1504,7 @@ button.property-logs-palette-swatch:focus-visible {
   gap: var(--size-4-2, 8px);
   overflow: hidden;
   color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-size: 0.9em;
   white-space: nowrap;
 }
 .property-logs-row-metadata span {
@@ -1562,7 +1565,7 @@ button.property-logs-palette-swatch:focus-visible {
     min-width: 0;
   }
   .property-logs-row-label {
-    max-width: 10rem;
+    max-width: 9rem;
   }
 }
 @media (max-width: 700px) {
@@ -1586,7 +1589,7 @@ button.property-logs-palette-swatch:focus-visible {
   font-family: var(--font-interface);
 }
 .property-logs-timeline-wrapper {
-  --property-logs-axis-height: 2.75rem;
+  --property-logs-axis-height: 2.25rem;
   position: relative;
   display: flex;
   min-height: 0;
@@ -1601,11 +1604,14 @@ button.property-logs-palette-swatch:focus-visible {
 }
 .property-logs-axis-rows {
   position: relative;
-  height: var(--property-logs-axis-height, 2.75rem);
+  display: flex;
+  height: var(--property-logs-axis-height, 2.25rem);
+  flex-direction: column;
 }
 .property-logs-axis-row {
   position: relative;
-  height: 50%;
+  min-height: 0;
+  flex: 1 1 0;
 }
 .property-logs-axis-cell {
   position: absolute;
@@ -1624,6 +1630,7 @@ button.property-logs-palette-swatch:focus-visible {
   color: var(--text-muted);
   font-family: var(--font-interface);
   font-size: var(--font-ui-smaller);
+  line-height: 1;
   white-space: nowrap;
 }
 .property-logs-axis-row-coarse .property-logs-axis-cell {
@@ -1651,12 +1658,32 @@ button.property-logs-axis-cell:focus-visible {
 }
 .property-logs-axis-dividers {
   position: absolute;
-  top: calc(var(--property-logs-axis-height, 2.75rem) + 1px);
+  z-index: 0;
+  top: calc(var(--property-logs-axis-height, 2.25rem) + 1px);
   right: 0;
   bottom: 0;
   left: var(--property-logs-axis-offset, 0px);
   overflow: hidden;
   pointer-events: none;
+}
+.property-logs-timeline {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+.property-logs-timeline .vis-timeline,
+.property-logs-timeline .vis-panel.vis-center,
+.property-logs-timeline .vis-panel.vis-background {
+  background: transparent;
+}
+.property-logs-timeline .vis-current-time {
+  z-index: 0;
+}
+.property-logs-timeline .vis-item.property-logs-segment {
+  z-index: 1;
+}
+.property-logs-timeline .vis-item.property-logs-journal-note {
+  z-index: 2;
 }
 .property-logs-axis-divider {
   position: absolute;
@@ -1691,8 +1718,8 @@ button.property-logs-axis-cell:focus-visible {
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 1.25rem;
-  height: 1.25rem;
+  width: 1rem;
+  height: 1rem;
   padding: 0;
   border: 0;
   background: transparent;
@@ -1713,12 +1740,78 @@ button.property-logs-axis-cell:focus-visible {
   color: var(--text-muted);
 }
 .property-logs-segment-button.is-folded {
+  max-width: 22rem;
   padding: 0 var(--size-4-1, 4px);
   gap: var(--size-4-1, 4px);
+  overflow: hidden;
   font-size: var(--font-ui-smaller);
+}
+.property-logs-segment-button.is-folded .property-logs-segment-title,
+.property-logs-segment-button.is-folded .property-logs-segment-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .property-logs-timeline .vis-item.property-logs-segment.is-folded {
   border-radius: var(--radius-s, 4px);
+}
+.property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-labelset .vis-label .vis-inner {
+  width: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-labelset .vis-label .vis-inner > * {
+  display: none;
+}
+.property-logs-floating-label {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  left: 0;
+  max-width: 12rem;
+  padding: 0 3px;
+  overflow: hidden;
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-size: 0.6rem;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.property-logs-timeline .vis-foreground .vis-group:hover .property-logs-floating-label {
+  color: var(--text-normal);
+}
+.property-logs-timeline-wrapper .property-logs-labels-corner-toggle {
+  position: absolute;
+  z-index: 5;
+  top: 1px;
+  left: 1px;
+  width: 0.95rem;
+  height: 0.95rem;
+  min-height: 0;
+  padding: 0;
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+.property-logs-timeline-wrapper .property-logs-labels-corner-toggle:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  opacity: 1;
+}
+.property-logs-timeline-wrapper .property-logs-labels-corner-toggle svg {
+  width: 0.7rem;
+  height: 0.7rem;
+}
+.property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-label.vis-nesting-group::before {
+  display: none;
+}
+.property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-ltr .vis-label:not(.vis-nesting-group):not(.vis-group-level-0),
+.property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-rtl .vis-label:not(.vis-nesting-group):not(.vis-group-level-0) {
+  padding-right: 0;
+  padding-left: 0;
 }
 .property-logs-timeline .vis-item.property-logs-journal-note {
   border: 0;
@@ -1730,18 +1823,18 @@ button.property-logs-axis-cell:focus-visible {
 }
 .property-logs-journal-button {
   display: inline-flex;
-  max-width: 16rem;
+  max-width: 14rem;
   align-items: center;
   gap: var(--size-4-1, 4px);
-  padding: 1px var(--size-4-2, 8px) 1px var(--size-4-1, 4px);
+  padding: 0 var(--size-4-2, 8px) 0 var(--size-4-1, 4px);
   border: 1px solid var(--property-logs-segment-color, var(--background-modifier-border));
   border-radius: var(--radius-l, 12px);
   background: var(--background-primary);
   box-shadow: none;
   color: var(--text-normal);
   font-family: var(--font-interface);
-  font-size: var(--font-ui-smaller);
-  line-height: 1.4;
+  font-size: 0.9em;
+  line-height: 1.35;
   cursor: pointer;
 }
 .property-logs-journal-button:hover {
@@ -1828,28 +1921,38 @@ button.property-logs-axis-cell:focus-visible {
   min-height: 0;
 }
 .property-logs-dashboard.is-compact .property-logs-row-label {
-  max-width: 9rem;
+  max-width: 8rem;
 }
 .property-logs-dashboard.is-compact .property-logs-timeline-wrapper {
-  --property-logs-axis-height: 2.25rem;
+  --property-logs-axis-height: 1.9rem;
+}
+.property-logs-dashboard.is-minimal .property-logs-floating-label {
+  font-size: 0.55rem;
 }
 .property-logs-dashboard.is-minimal .property-logs-timeline {
   min-height: 3rem;
 }
 .property-logs-dashboard.is-minimal .property-logs-timeline-wrapper {
-  --property-logs-axis-height: 1.5rem;
+  --property-logs-axis-height: 1.75rem;
+}
+.property-logs-dashboard.is-minimal .property-logs-axis-cell {
+  font-size: 0.65rem;
 }
 .property-logs-dashboard.is-minimal .property-logs-row-label {
-  max-width: 6rem;
+  max-width: 5.5rem;
 }
 .property-logs-dashboard.is-minimal .vis-labelset .vis-label .vis-inner {
-  padding: var(--size-4-1, 4px) var(--size-4-2, 8px);
+  padding: 0 var(--size-4-1, 4px);
 }
 .property-logs-dashboard.is-minimal .property-logs-segment-button,
 .property-logs-dashboard.is-minimal .property-logs-row-title {
-  min-height: 1.1rem;
+  min-height: 1rem;
   padding: 0 var(--size-4-1, 4px);
-  font-size: var(--font-ui-smaller);
+  font-size: 0.65rem;
+}
+.property-logs-dashboard.is-minimal .property-logs-status-label {
+  min-width: 0;
+  font-size: 0.65rem;
 }
 .property-logs-dashboard.is-minimal .property-logs-segment-meta,
 .property-logs-dashboard.is-minimal .property-logs-row-metadata {

@@ -44,6 +44,8 @@ export interface DashboardSettings {
   noteOpenGesture: NoteOpenGesture;
   /** Group ids collapsed into a single minimal row. */
   foldedGroups: string[];
+  /** Folds the left label column away so the calendar gets the full width. */
+  collapsedLabels: boolean;
   /** Draws the clickable day/week/month axis and its dividers. */
   showPeriodAxis: boolean;
   /** Shows `- [n] …` lines from periodic notes as timeline notes. */
@@ -136,6 +138,7 @@ export function createDashboardSettings(id: string, name = "Dashboard"): Dashboa
     sortAscending: true,
     noteOpenGesture: "ctrl-click",
     foldedGroups: [],
+    collapsedLabels: false,
     showPeriodAxis: true,
     showJournalNotes: true,
   };
@@ -229,6 +232,7 @@ export function normalizeDashboardSettings(
     sortAscending: typeof value.sortAscending === "boolean" ? value.sortAscending : true,
     noteOpenGesture: value.noteOpenGesture === "click" ? "click" : "ctrl-click",
     foldedGroups: strings(value.foldedGroups),
+    collapsedLabels: value.collapsedLabels === true,
     showPeriodAxis: typeof value.showPeriodAxis === "boolean" ? value.showPeriodAxis : true,
     showJournalNotes: typeof value.showJournalNotes === "boolean" ? value.showJournalNotes : true,
   };

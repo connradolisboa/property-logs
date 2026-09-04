@@ -170,8 +170,9 @@ button.property-logs-palette-swatch:focus-visible {
   display: flex;
   align-items: end;
   flex-wrap: wrap;
-  gap: var(--size-4-2, 8px);
-  padding: var(--size-4-3, 12px);
+  gap: var(--size-4-1, 4px) var(--size-4-2, 8px);
+  padding: var(--size-4-2, 8px);
+  font-size: var(--font-ui-smaller);
   border-bottom: 1px solid var(--background-modifier-border);
   background: var(--background-primary);
   flex: 0 0 auto;
@@ -189,8 +190,8 @@ button.property-logs-palette-swatch:focus-visible {
 
 .property-logs-toolbar-field {
   display: flex;
-  min-width: 8rem;
-  flex: 1 1 9rem;
+  min-width: 6rem;
+  flex: 1 1 7rem;
   flex-direction: column;
   gap: var(--size-4-1, 4px);
   color: var(--text-muted);
@@ -223,7 +224,7 @@ button.property-logs-palette-swatch:focus-visible {
 }
 
 .property-logs-timeline-controls button {
-  min-height: 1.75rem;
+  min-height: 1.5rem;
 }
 
 .property-logs-today-button {
@@ -257,15 +258,15 @@ button.property-logs-palette-swatch:focus-visible {
 
 .property-logs-loading {
   display: flex;
-  min-height: 16rem;
+  min-height: 12rem;
   flex-direction: column;
-  gap: var(--size-4-3, 12px);
-  padding: var(--size-4-4, 16px);
+  gap: var(--size-4-2, 8px);
+  padding: var(--size-4-3, 12px);
   flex: 1 1 auto;
 }
 
 .property-logs-loading-line {
-  height: 2.25rem;
+  height: 1.75rem;
   border-radius: var(--radius-s, 6px);
   background: var(--background-secondary);
   opacity: 0.7;
@@ -281,7 +282,7 @@ button.property-logs-palette-swatch:focus-visible {
 
 .property-logs-empty-state {
   display: flex;
-  min-height: 16rem;
+  min-height: 12rem;
   align-items: center;
   justify-content: center;
   flex-direction: column;
@@ -298,7 +299,7 @@ button.property-logs-palette-swatch:focus-visible {
 
 .property-logs-timeline {
   height: 0;
-  min-height: 16rem;
+  min-height: 12rem;
   flex: 1 1 0;
   /* vis-timeline owns the vertical scroller. A second native scroller here
      makes horizontal trackpad movement fight the timeline's own range pan. */
@@ -314,7 +315,7 @@ button.property-logs-palette-swatch:focus-visible {
   background: var(--background-primary);
   color: var(--text-normal);
   font-family: var(--font-interface);
-  font-size: var(--font-ui-small);
+  font-size: var(--font-ui-smaller);
 }
 
 .property-logs-error-state p {
@@ -345,7 +346,7 @@ button.property-logs-palette-swatch:focus-visible {
 }
 
 .property-logs-timeline .vis-labelset .vis-label .vis-inner {
-  padding: var(--size-4-2, 8px) var(--size-4-3, 12px);
+  padding: var(--size-4-1, 4px) var(--size-4-2, 8px);
 }
 
 .property-logs-timeline .vis-label.property-logs-group-header,
@@ -368,10 +369,10 @@ button.property-logs-palette-swatch:focus-visible {
 
 .property-logs-status-label {
   display: flex;
-  min-width: 8rem;
+  min-width: 5rem;
   align-items: center;
   justify-content: space-between;
-  gap: var(--size-4-3, 12px);
+  gap: var(--size-4-2, 8px);
 }
 
 .property-logs-status-name {
@@ -382,15 +383,15 @@ button.property-logs-palette-swatch:focus-visible {
 
 .property-logs-status-count {
   display: inline-flex;
-  min-width: 1.35rem;
-  height: 1.35rem;
+  min-width: 1.1rem;
+  height: 1.1rem;
   align-items: center;
   justify-content: center;
   padding: 0 var(--size-4-1, 4px);
   border-radius: 999px;
   background: var(--background-modifier-hover);
   color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-size: 0.85em;
   font-weight: var(--font-medium);
 }
 
@@ -451,22 +452,33 @@ button.property-logs-palette-swatch:focus-visible {
 }
 
 .property-logs-timeline .vis-item.property-logs-segment .vis-item-content {
-  max-width: 28rem;
   padding: 0;
+}
+
+/* A block is only as wide as the dates it covers, which hides most note names
+   once the calendar is zoomed out. Letting this frame overflow runs the label
+   past the block — over today and on into the empty future — instead of
+   clipping it. vis-timeline re-reads this on every redraw and folds the label
+   width into its stacking maths, so names stay whole and rows stay free of
+   collisions at any zoom. Folded groups keep clipping: sharing one line is the
+   whole point of folding them. */
+.property-logs-timeline .vis-item.property-logs-segment:not(.is-folded) .vis-item-overflow {
+  overflow: visible;
 }
 
 .property-logs-segment-button {
   display: flex;
   width: auto;
-  max-width: 28rem;
-  min-height: 1.5rem;
+  min-height: 1.25rem;
   align-items: center;
-  gap: var(--size-4-2, 8px);
+  gap: var(--size-4-1, 4px);
   padding: 0 var(--size-4-2, 8px);
-  overflow: hidden;
+  overflow: visible;
   border: 0;
   border-radius: inherit;
-  background: transparent;
+  /* The label carries the block's own colour, so it stays legible over the
+     bare calendar where it overhangs the block. */
+  background: var(--property-logs-segment-color, var(--interactive-accent));
   color: inherit;
   box-shadow: none;
   font: inherit;
@@ -479,8 +491,6 @@ button.property-logs-palette-swatch:focus-visible {
 
 .property-logs-segment-title,
 .property-logs-segment-meta {
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -490,7 +500,7 @@ button.property-logs-palette-swatch:focus-visible {
 
 .property-logs-segment-meta {
   opacity: 0.78;
-  font-size: var(--font-ui-smaller);
+  font-size: 0.9em;
   font-weight: var(--font-normal);
 }
 
@@ -505,8 +515,12 @@ button.property-logs-palette-swatch:focus-visible {
 .property-logs-segment-button:hover,
 .property-logs-segment-button:active {
   border: 0;
-  background: transparent;
+  background: var(--property-logs-segment-color, var(--interactive-accent));
   box-shadow: none;
+}
+
+.property-logs-segment-button:hover {
+  opacity: 0.88;
 }
 
 .property-logs-segment-button:active {
@@ -524,10 +538,10 @@ button.property-logs-palette-swatch:focus-visible {
 
 .property-logs-row-label {
   display: grid;
-  max-width: 18rem;
+  max-width: 14rem;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--size-4-1, 4px) var(--size-4-2, 8px);
+  gap: 0 var(--size-4-2, 8px);
 }
 
 .property-logs-row-title {
@@ -559,7 +573,7 @@ button.property-logs-palette-swatch:focus-visible {
   gap: var(--size-4-2, 8px);
   overflow: hidden;
   color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-size: 0.9em;
   white-space: nowrap;
 }
 
@@ -633,7 +647,7 @@ button.property-logs-palette-swatch:focus-visible {
   }
 
   .property-logs-row-label {
-    max-width: 10rem;
+    max-width: 9rem;
   }
 }
 
@@ -663,7 +677,7 @@ button.property-logs-palette-swatch:focus-visible {
 }
 
 .property-logs-timeline-wrapper {
-  --property-logs-axis-height: 2.75rem;
+  --property-logs-axis-height: 2.25rem;
   position: relative;
   display: flex;
   min-height: 0;
@@ -682,12 +696,18 @@ button.property-logs-palette-swatch:focus-visible {
 
 .property-logs-axis-rows {
   position: relative;
-  height: var(--property-logs-axis-height, 2.75rem);
+  display: flex;
+  height: var(--property-logs-axis-height, 2.25rem);
+  flex-direction: column;
 }
 
+/* Equal flex shares, rather than percentage heights, keep the two calendar
+   rows from rounding into each other when the strip is only a few pixels
+   taller than its own text. */
 .property-logs-axis-row {
   position: relative;
-  height: 50%;
+  min-height: 0;
+  flex: 1 1 0;
 }
 
 .property-logs-axis-cell {
@@ -707,6 +727,7 @@ button.property-logs-palette-swatch:focus-visible {
   color: var(--text-muted);
   font-family: var(--font-interface);
   font-size: var(--font-ui-smaller);
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -739,14 +760,47 @@ button.property-logs-axis-cell:focus-visible {
   background: var(--background-modifier-active-hover, var(--background-modifier-hover));
 }
 
+/* The calendar dividers are an overlay siblings-after the timeline, so they
+   would stripe across the blocks. Dropping them to the back and clearing the
+   backgrounds of the panels stacked above lets the lines show through the
+   empty calendar while the blocks paint over them. */
 .property-logs-axis-dividers {
   position: absolute;
-  top: calc(var(--property-logs-axis-height, 2.75rem) + 1px);
+  z-index: 0;
+  top: calc(var(--property-logs-axis-height, 2.25rem) + 1px);
   right: 0;
   bottom: 0;
   left: var(--property-logs-axis-offset, 0px);
   overflow: hidden;
   pointer-events: none;
+}
+
+.property-logs-timeline {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+.property-logs-timeline .vis-timeline,
+.property-logs-timeline .vis-panel.vis-center,
+.property-logs-timeline .vis-panel.vis-background {
+  background: transparent;
+}
+
+/* An explicit order for the two vis layers that carry their own z-index, so a
+   block always covers the now-marker rather than being cut by it. */
+.property-logs-timeline .vis-current-time {
+  z-index: 0;
+}
+
+.property-logs-timeline .vis-item.property-logs-segment {
+  z-index: 1;
+}
+
+/* Journal pills are annotations on top of the run they belong to, so they keep
+   the layer above the blocks they would otherwise disappear behind. */
+.property-logs-timeline .vis-item.property-logs-journal-note {
+  z-index: 2;
 }
 
 .property-logs-axis-divider {
@@ -789,8 +843,8 @@ button.property-logs-axis-cell:focus-visible {
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 1.25rem;
-  height: 1.25rem;
+  width: 1rem;
+  height: 1rem;
   padding: 0;
   border: 0;
   background: transparent;
@@ -815,13 +869,100 @@ button.property-logs-axis-cell:focus-visible {
 }
 
 .property-logs-segment-button.is-folded {
+  max-width: 22rem;
   padding: 0 var(--size-4-1, 4px);
   gap: var(--size-4-1, 4px);
+  overflow: hidden;
   font-size: var(--font-ui-smaller);
+}
+
+.property-logs-segment-button.is-folded .property-logs-segment-title,
+.property-logs-segment-button.is-folded .property-logs-segment-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .property-logs-timeline .vis-item.property-logs-segment.is-folded {
   border-radius: var(--radius-s, 4px);
+}
+
+/* The label column folded away to nothing. vis-timeline measures the left
+   panel from this content, so emptying it is what actually collapses it. The
+   values cannot follow it out sideways — that panel scrolls vertically, which
+   forces its horizontal overflow to clip — so they are drawn into the rows
+   themselves as .property-logs-floating-label instead. */
+.property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-labelset .vis-label .vis-inner {
+  width: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-labelset .vis-label .vis-inner > * {
+  display: none;
+}
+
+/* The row's value, written into the calendar at the start of its own row. It
+   never takes a click: the blocks underneath keep every gesture. */
+.property-logs-floating-label {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  left: 0;
+  max-width: 12rem;
+  padding: 0 3px;
+  overflow: hidden;
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-size: 0.6rem;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.property-logs-timeline .vis-foreground .vis-group:hover .property-logs-floating-label {
+  color: var(--text-normal);
+}
+
+/* Small enough to sit in the corner over the folded column, in embeds that
+   have no toolbar to put it in. */
+.property-logs-timeline-wrapper .property-logs-labels-corner-toggle {
+  position: absolute;
+  z-index: 5;
+  top: 1px;
+  left: 1px;
+  width: 0.95rem;
+  height: 0.95rem;
+  min-height: 0;
+  padding: 0;
+  border-radius: var(--radius-s, 4px);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.property-logs-timeline-wrapper .property-logs-labels-corner-toggle:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  opacity: 1;
+}
+
+.property-logs-timeline-wrapper .property-logs-labels-corner-toggle svg {
+  width: 0.7rem;
+  height: 0.7rem;
+}
+
+/* vis-timeline's own nesting chevron and its level indent sit outside
+   `.vis-inner`, and would hold the folded column open on their own. */
+.property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-label.vis-nesting-group::before {
+  display: none;
+}
+
+.property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-ltr .vis-label:not(.vis-nesting-group):not(.vis-group-level-0),
+.property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-rtl .vis-label:not(.vis-nesting-group):not(.vis-group-level-0) {
+  padding-right: 0;
+  padding-left: 0;
 }
 
 /* ─── Notes from periodic notes ────────────────────────────────────────────── */
@@ -838,18 +979,18 @@ button.property-logs-axis-cell:focus-visible {
 
 .property-logs-journal-button {
   display: inline-flex;
-  max-width: 16rem;
+  max-width: 14rem;
   align-items: center;
   gap: var(--size-4-1, 4px);
-  padding: 1px var(--size-4-2, 8px) 1px var(--size-4-1, 4px);
+  padding: 0 var(--size-4-2, 8px) 0 var(--size-4-1, 4px);
   border: 1px solid var(--property-logs-segment-color, var(--background-modifier-border));
   border-radius: var(--radius-l, 12px);
   background: var(--background-primary);
   box-shadow: none;
   color: var(--text-normal);
   font-family: var(--font-interface);
-  font-size: var(--font-ui-smaller);
-  line-height: 1.4;
+  font-size: 0.9em;
+  line-height: 1.35;
   cursor: pointer;
 }
 
@@ -954,34 +1095,50 @@ button.property-logs-axis-cell:focus-visible {
 }
 
 .property-logs-dashboard.is-compact .property-logs-row-label {
-  max-width: 9rem;
+  max-width: 8rem;
 }
 
 .property-logs-dashboard.is-compact .property-logs-timeline-wrapper {
-  --property-logs-axis-height: 2.25rem;
+  --property-logs-axis-height: 1.9rem;
+}
+
+.property-logs-dashboard.is-minimal .property-logs-floating-label {
+  font-size: 0.55rem;
 }
 
 .property-logs-dashboard.is-minimal .property-logs-timeline {
   min-height: 3rem;
 }
 
+/* Two calendar rows plus their own text need room: at 1.5rem the day and week
+   labels ran into each other, so the strip is sized from the 0.65rem text it
+   actually holds. */
 .property-logs-dashboard.is-minimal .property-logs-timeline-wrapper {
-  --property-logs-axis-height: 1.5rem;
+  --property-logs-axis-height: 1.75rem;
+}
+
+.property-logs-dashboard.is-minimal .property-logs-axis-cell {
+  font-size: 0.65rem;
 }
 
 .property-logs-dashboard.is-minimal .property-logs-row-label {
-  max-width: 6rem;
+  max-width: 5.5rem;
 }
 
 .property-logs-dashboard.is-minimal .vis-labelset .vis-label .vis-inner {
-  padding: var(--size-4-1, 4px) var(--size-4-2, 8px);
+  padding: 0 var(--size-4-1, 4px);
 }
 
 .property-logs-dashboard.is-minimal .property-logs-segment-button,
 .property-logs-dashboard.is-minimal .property-logs-row-title {
-  min-height: 1.1rem;
+  min-height: 1rem;
   padding: 0 var(--size-4-1, 4px);
-  font-size: var(--font-ui-smaller);
+  font-size: 0.65rem;
+}
+
+.property-logs-dashboard.is-minimal .property-logs-status-label {
+  min-width: 0;
+  font-size: 0.65rem;
 }
 
 .property-logs-dashboard.is-minimal .property-logs-segment-meta,
