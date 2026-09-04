@@ -42203,11 +42203,13 @@ ${plainNoteText(note.text)}`);
     content.type = "button";
     content.className = "property-logs-folded-segment-button";
     const primaryAction = dashboard.noteOpenGesture === "click" ? "Click to open note; Ctrl-click to change value." : "Click to change value; Ctrl-click to open note.";
-    applyTooltip(content, [
+    const tooltip = [
       row.file.basename,
       `${segment.value ?? "Unset"} \xB7 ${localDate(segment.start)} \u2192 ${localDate(segment.end)}`,
       primaryAction
-    ].join("\n"));
+    ].join("\n");
+    content.setAttribute("aria-label", tooltip);
+    applyTooltip(content, tooltip);
     content.addEventListener("click", (event2) => {
       event2.stopPropagation();
       this.activateTimelineBlock(row, dashboard, event2);
