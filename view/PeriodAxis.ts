@@ -180,15 +180,6 @@ export class PeriodAxis {
       divider.style.left = `${position}px`;
     }
 
-    if (this.focus) {
-      const left = Math.max(x(this.focus.start), 0);
-      const right = Math.min(x(this.focus.end), width);
-      if (right > left) {
-        const band = this.dividersEl.createDiv({ cls: "property-logs-axis-focus-band" });
-        band.style.left = `${left}px`;
-        band.style.width = `${right - left}px`;
-      }
-    }
   }
 
   destroy(): void {

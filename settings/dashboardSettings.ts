@@ -176,7 +176,7 @@ function renderPropertyRules(
     await save();
     draw();
   };
-  new Setting(container)
+  const addRuleSetting = new Setting(container)
     .addText((text) => {
       keyInput = text;
       text.setPlaceholder("Property key");
@@ -189,6 +189,7 @@ function renderPropertyRules(
       });
     })
     .addButton((button) => button.setButtonText("Add").onClick(add));
+  addRuleSetting.settingEl.addClass("property-logs-property-rule-add");
 }
 
 function renderColorMap(

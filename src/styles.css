@@ -107,6 +107,31 @@
   margin-top: var(--size-4-2, 8px);
 }
 
+/* A two-column scope card is still wide enough for both property fields and
+   its action. Obsidian's default text-control widths are fixed, so they push
+   the Add button outside the card instead of sharing the available space. */
+.property-logs-property-rule-add .setting-item-control {
+  display: grid;
+  width: 100%;
+  max-width: none;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: var(--size-4-2, 8px);
+}
+
+.property-logs-property-rule-add .setting-item-info {
+  display: none;
+}
+
+.property-logs-property-rule-add .setting-item-control-input,
+.property-logs-property-rule-add input {
+  width: 100%;
+  min-width: 0;
+}
+
+.property-logs-property-rule-add .setting-item-control > button {
+  white-space: nowrap;
+}
+
 .property-logs-map-row,
 .property-logs-color-row {
   border-bottom: 1px solid var(--background-modifier-border);
@@ -436,9 +461,12 @@ button.property-logs-palette-swatch:focus-visible {
 }
 
 .property-logs-timeline .vis-item.property-logs-segment {
-  border: 0;
+  /* The range is only the invisible positioning frame. The button below is
+     the visible value pill, so the short date span must not peek out as a
+     coloured border around an overflowing title. */
+  border: 0 !important;
   border-radius: var(--radius-s, 6px);
-  background: var(--property-logs-segment-color, var(--interactive-accent));
+  background: transparent !important;
   color: var(--property-logs-segment-text-color, var(--text-on-accent));
   box-shadow: none;
   cursor: pointer;
@@ -817,14 +845,6 @@ button.property-logs-axis-cell:focus-visible {
   opacity: 0.9;
 }
 
-.property-logs-axis-focus-band {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  background: var(--text-accent);
-  opacity: 0.07;
-}
-
 /* ─── Folding ──────────────────────────────────────────────────────────────── */
 
 .property-logs-group-label {
@@ -1035,6 +1055,41 @@ button.property-logs-axis-cell:focus-visible {
 }
 
 /* ─── Embedded dashboards ──────────────────────────────────────────────────── */
+
+.property-logs-embed-body {
+  position: relative;
+}
+
+.property-logs-minimal-open-dashboard {
+  position: absolute;
+  z-index: 5;
+  top: 2px;
+  right: 2px;
+  width: 1rem;
+  height: 1rem;
+  min-width: 1rem;
+  min-height: 1rem;
+  padding: 1px;
+  border: 0;
+  border-radius: var(--radius-s, 3px);
+  background: color-mix(in srgb, var(--background-primary) 72%, transparent);
+  box-shadow: none;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.property-logs-minimal-open-dashboard:hover,
+.property-logs-minimal-open-dashboard:focus-visible {
+  background: var(--background-modifier-hover);
+  box-shadow: none;
+  color: var(--text-normal);
+  opacity: 1;
+}
+
+.property-logs-minimal-open-dashboard svg {
+  width: 0.7rem;
+  height: 0.7rem;
+}
 
 .property-logs-embed {
   margin: var(--size-4-3, 12px) 0;

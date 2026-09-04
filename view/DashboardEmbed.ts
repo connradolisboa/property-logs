@@ -3,6 +3,7 @@ import {
   MarkdownPostProcessorContext,
   MarkdownRenderChild,
   TFile,
+  setIcon,
 } from "obsidian";
 
 import { parseEmbedOptions } from "../data/embedOptions";
@@ -107,7 +108,24 @@ export class DashboardEmbed extends MarkdownRenderChild {
     }
 
     const context = await this.resolveContext(options.date, options.period);
-    const timelineEl = this.containerEl.createDiv({ cls: "property-logs-embed-body" });
+    const embedBody = this.containerEl.createDiv({ cls: "property-logs-embed-body" });
+    const timelineEl = embedBody.createDiv({ cls: "property-logs-embed-timeline" });
+    if (options.minimal) {
+      const openDashboard = embedBody.createEl("button", {
+        cls: "property-logs-minimal-open-dashboard clickable-icon",
+        attr: {
+          type: "button",
+          "aria-label": `Open ${dashboard.name} dashboard`,
+          title: `Open ${dashboard.name} dashboard`,
+        },
+      });
+      setIcon(openDashboard, "maximize-2");
+      openDashboard.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void this.host.openDashboard(dashboard.id);
+      });
+    }
     this.timeline = new DashboardTimeline(this.app, this.host, timelineEl, {
       compact: true,
       minimal: options.minimal,

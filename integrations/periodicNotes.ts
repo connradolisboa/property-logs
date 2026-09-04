@@ -82,38 +82,34 @@ export class PeriodicNotes {
 
   /** Full resolution, preferring the Journals index over heuristics. */
   async contextForFile(file: TFile): Promise<PeriodicNoteContext | null> {
-    const config = this.getConfig();
-    const api = this.api();
-    if (api) {
-      try {
-        const note = await api.journalOf(file);
-        if (note) {
-          const start = parseDateString(note.date);
-          if (start) {
-            const end = note.endDate ? parseDateString(note.endDate) : null;
-            const info = await api.journalInfo(note.journal).catch(() => null);
-            const writeType = info?.write?.type;
-            const granularity = isPeriodGranularity(writeType)
-              ? writeType
-              : granularityForSpan(
-                  end ? (end.getTime() - start.getTime()) / DAY_MS + 1 : 1
-                );
-            return {
-              granularity,
-              date: start,
-              range: end
-                ? { start, end: new Date(end.getTime() + DAY_MS) }
-                : periodRange(granularity, start, config.weekStartsOn),
-              journalName: note.journal,
-              source: "journals",
-            };
-          }
-        }
-      } catch (error) {
-        console.error("Property Logs: the Journals API could not resolve this note", error);
-      }
-    }
+    const journalContext = await this.contextFromJournals(file);
+    if (journalContext) return journalContext;
     return this.contextForFileSync(file);
+  }
+
+  /**
+   * Strict eligibility for checkbox annotations. A note merely mentioning a
+   * date, or having one in its filename, is not automatically a journal.
+   */
+  async journalContextForFile(file: TFile): Promise<PeriodicNoteContext | null> {
+    const journalContext = await this.contextFromJournals(file);
+    if (journalContext) return journalContext;
+
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as
+      | Record<string, unknown>
+      | undefined;
+    // Custom periodic templates can opt in explicitly, without making a
+    // generic `date:` field on an ordinary project note act like a journal.
+    if (
+      frontmatter
+      && (typeof frontmatter.journal === "string"
+        || Object.prototype.hasOwnProperty.call(frontmatter, "journal-start-date"))
+    ) {
+      const context = contextFromFrontmatter(frontmatter, this.getConfig());
+      if (context) return context;
+    }
+
+    return this.dailyNoteContextForFile(file);
   }
 
   /** Granularities that have a journal (or a daily note) to open. */
@@ -175,6 +171,53 @@ export class PeriodicNotes {
       folder: typeof options.folder === "string" && options.folder ? options.folder : fallback.folder,
       format: typeof options.format === "string" && options.format ? options.format : fallback.format,
     };
+  }
+
+  private dailyNoteContextForFile(file: TFile): PeriodicNoteContext | null {
+    const { folder, format } = this.dailyNoteConfig();
+    const folderPath = normalizePath(folder || "");
+    const parentPath = normalizePath(file.parent?.path || "");
+    if (parentPath !== folderPath) return null;
+
+    const parsed = moment(file.basename, format, true);
+    if (!parsed.isValid()) return null;
+    const date = new Date(parsed.year(), parsed.month(), parsed.date());
+    return {
+      granularity: "day",
+      date,
+      range: periodRange("day", date, this.getConfig().weekStartsOn),
+      source: "daily-notes",
+    };
+  }
+
+  private async contextFromJournals(file: TFile): Promise<PeriodicNoteContext | null> {
+    const config = this.getConfig();
+    const api = this.api();
+    if (!api) return null;
+    try {
+      const note = await api.journalOf(file);
+      if (!note) return null;
+      const start = parseDateString(note.date);
+      if (!start) return null;
+      const end = note.endDate ? parseDateString(note.endDate) : null;
+      const info = await api.journalInfo(note.journal).catch(() => null);
+      const writeType = info?.write?.type;
+      const granularity = isPeriodGranularity(writeType)
+        ? writeType
+        : granularityForSpan(end ? (end.getTime() - start.getTime()) / DAY_MS + 1 : 1);
+      return {
+        granularity,
+        date: start,
+        range: end
+          ? { start, end: new Date(end.getTime() + DAY_MS) }
+          : periodRange(granularity, start, config.weekStartsOn),
+        journalName: note.journal,
+        source: "journals",
+      };
+    } catch (error) {
+      console.error("Property Logs: the Journals API could not resolve this note", error);
+      return null;
+    }
   }
 
   private async openDailyNoteFallback(date: Date): Promise<void> {

@@ -623,16 +623,17 @@ var JournalNoteIndex = class {
     const markers = this.getMarkers();
     if (markers.length === 0) return [];
     const wanted = new Set(markers.map((style) => style.marker));
-    const candidates = [];
-    for (const file of this.app.vault.getMarkdownFiles()) {
+    const filesWithMarkers = this.app.vault.getMarkdownFiles().filter((file) => {
       const listItems = this.app.metadataCache.getFileCache(file)?.listItems;
-      if (!listItems?.some((item) => item.task !== void 0 && wanted.has(item.task))) continue;
-      const context = this.periodic.contextForFileSync(file);
-      if (!context) continue;
-      if (context.range.end.getTime() < window2.start.getTime()) continue;
-      if (context.range.start.getTime() > window2.end.getTime()) continue;
-      candidates.push({ file, context });
-    }
+      return listItems?.some((item) => item.task !== void 0 && wanted.has(item.task)) ?? false;
+    });
+    const candidates = (await Promise.all(filesWithMarkers.map(async (file) => {
+      const context = await this.periodic.journalContextForFile(file);
+      if (!context) return null;
+      if (context.range.end.getTime() < window2.start.getTime()) return null;
+      if (context.range.start.getTime() > window2.end.getTime()) return null;
+      return { file, context };
+    }))).flatMap((candidate) => candidate ? [candidate] : []);
     const parsedCandidates = await Promise.all(candidates.map(async ({ file, context }) => ({
       file,
       context,
@@ -790,34 +791,23 @@ var PeriodicNotes = class {
   }
   /** Full resolution, preferring the Journals index over heuristics. */
   async contextForFile(file) {
-    const config = this.getConfig();
-    const api = this.api();
-    if (api) {
-      try {
-        const note = await api.journalOf(file);
-        if (note) {
-          const start = parseDateString(note.date);
-          if (start) {
-            const end = note.endDate ? parseDateString(note.endDate) : null;
-            const info = await api.journalInfo(note.journal).catch(() => null);
-            const writeType = info?.write?.type;
-            const granularity = isPeriodGranularity(writeType) ? writeType : granularityForSpan(
-              end ? (end.getTime() - start.getTime()) / DAY_MS3 + 1 : 1
-            );
-            return {
-              granularity,
-              date: start,
-              range: end ? { start, end: new Date(end.getTime() + DAY_MS3) } : periodRange(granularity, start, config.weekStartsOn),
-              journalName: note.journal,
-              source: "journals"
-            };
-          }
-        }
-      } catch (error) {
-        console.error("Property Logs: the Journals API could not resolve this note", error);
-      }
-    }
+    const journalContext = await this.contextFromJournals(file);
+    if (journalContext) return journalContext;
     return this.contextForFileSync(file);
+  }
+  /**
+   * Strict eligibility for checkbox annotations. A note merely mentioning a
+   * date, or having one in its filename, is not automatically a journal.
+   */
+  async journalContextForFile(file) {
+    const journalContext = await this.contextFromJournals(file);
+    if (journalContext) return journalContext;
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (frontmatter && (typeof frontmatter.journal === "string" || Object.prototype.hasOwnProperty.call(frontmatter, "journal-start-date"))) {
+      const context = contextFromFrontmatter(frontmatter, this.getConfig());
+      if (context) return context;
+    }
+    return this.dailyNoteContextForFile(file);
   }
   /** Granularities that have a journal (or a daily note) to open. */
   async availableGranularities() {
@@ -874,6 +864,46 @@ var PeriodicNotes = class {
       folder: typeof options.folder === "string" && options.folder ? options.folder : fallback.folder,
       format: typeof options.format === "string" && options.format ? options.format : fallback.format
     };
+  }
+  dailyNoteContextForFile(file) {
+    const { folder, format } = this.dailyNoteConfig();
+    const folderPath = (0, import_obsidian.normalizePath)(folder || "");
+    const parentPath = (0, import_obsidian.normalizePath)(file.parent?.path || "");
+    if (parentPath !== folderPath) return null;
+    const parsed = (0, import_obsidian.moment)(file.basename, format, true);
+    if (!parsed.isValid()) return null;
+    const date2 = new Date(parsed.year(), parsed.month(), parsed.date());
+    return {
+      granularity: "day",
+      date: date2,
+      range: periodRange("day", date2, this.getConfig().weekStartsOn),
+      source: "daily-notes"
+    };
+  }
+  async contextFromJournals(file) {
+    const config = this.getConfig();
+    const api = this.api();
+    if (!api) return null;
+    try {
+      const note = await api.journalOf(file);
+      if (!note) return null;
+      const start = parseDateString(note.date);
+      if (!start) return null;
+      const end = note.endDate ? parseDateString(note.endDate) : null;
+      const info = await api.journalInfo(note.journal).catch(() => null);
+      const writeType = info?.write?.type;
+      const granularity = isPeriodGranularity(writeType) ? writeType : granularityForSpan(end ? (end.getTime() - start.getTime()) / DAY_MS3 + 1 : 1);
+      return {
+        granularity,
+        date: start,
+        range: end ? { start, end: new Date(end.getTime() + DAY_MS3) } : periodRange(granularity, start, config.weekStartsOn),
+        journalName: note.journal,
+        source: "journals"
+      };
+    } catch (error) {
+      console.error("Property Logs: the Journals API could not resolve this note", error);
+      return null;
+    }
   }
   async openDailyNoteFallback(date2) {
     const { folder, format } = this.dailyNoteConfig();
@@ -1028,7 +1058,7 @@ function renderPropertyRules(container, title, description, rules2, save) {
     await save();
     draw();
   };
-  new import_obsidian3.Setting(container).addText((text) => {
+  const addRuleSetting = new import_obsidian3.Setting(container).addText((text) => {
     keyInput = text;
     text.setPlaceholder("Property key");
   }).addText((text) => {
@@ -1038,6 +1068,7 @@ function renderPropertyRules(container, title, description, rules2, save) {
       if (event2.key === "Enter") void add();
     });
   }).addButton((button) => button.setButtonText("Add").onClick(add));
+  addRuleSetting.settingEl.addClass("property-logs-property-rule-add");
 }
 function renderColorMap(container, dashboard, save) {
   const list = container.createDiv({ cls: "property-logs-map-list" });
@@ -40344,15 +40375,6 @@ var PeriodAxis = class {
       });
       divider.style.left = `${position}px`;
     }
-    if (this.focus) {
-      const left = Math.max(x(this.focus.start), 0);
-      const right = Math.min(x(this.focus.end), width);
-      if (right > left) {
-        const band = this.dividersEl.createDiv({ cls: "property-logs-axis-focus-band" });
-        band.style.left = `${left}px`;
-        band.style.width = `${right - left}px`;
-      }
-    }
   }
   destroy() {
     if (this.frame !== null) window.cancelAnimationFrame(this.frame);
@@ -41456,7 +41478,24 @@ var DashboardEmbed = class extends import_obsidian9.MarkdownRenderChild {
       options.errors.forEach((error) => warning.createDiv({ text: error }));
     }
     const context = await this.resolveContext(options.date, options.period);
-    const timelineEl = this.containerEl.createDiv({ cls: "property-logs-embed-body" });
+    const embedBody = this.containerEl.createDiv({ cls: "property-logs-embed-body" });
+    const timelineEl = embedBody.createDiv({ cls: "property-logs-embed-timeline" });
+    if (options.minimal) {
+      const openDashboard = embedBody.createEl("button", {
+        cls: "property-logs-minimal-open-dashboard clickable-icon",
+        attr: {
+          type: "button",
+          "aria-label": `Open ${dashboard.name} dashboard`,
+          title: `Open ${dashboard.name} dashboard`
+        }
+      });
+      (0, import_obsidian9.setIcon)(openDashboard, "maximize-2");
+      openDashboard.addEventListener("click", (event2) => {
+        event2.preventDefault();
+        event2.stopPropagation();
+        void this.host.openDashboard(dashboard.id);
+      });
+    }
     this.timeline = new DashboardTimeline(this.app, this.host, timelineEl, {
       compact: true,
       minimal: options.minimal,

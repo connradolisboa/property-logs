@@ -48,16 +48,17 @@ export class JournalNoteIndex {
     if (markers.length === 0) return [];
     const wanted = new Set(markers.map((style) => style.marker));
 
-    const candidates: Array<{ file: TFile; context: NonNullable<ReturnType<PeriodicNotes["contextForFileSync"]>> }> = [];
-    for (const file of this.app.vault.getMarkdownFiles()) {
+    const filesWithMarkers = this.app.vault.getMarkdownFiles().filter((file) => {
       const listItems = this.app.metadataCache.getFileCache(file)?.listItems;
-      if (!listItems?.some((item) => item.task !== undefined && wanted.has(item.task))) continue;
-      const context = this.periodic.contextForFileSync(file);
-      if (!context) continue;
-      if (context.range.end.getTime() < window.start.getTime()) continue;
-      if (context.range.start.getTime() > window.end.getTime()) continue;
-      candidates.push({ file, context });
-    }
+      return listItems?.some((item) => item.task !== undefined && wanted.has(item.task)) ?? false;
+    });
+    const candidates = (await Promise.all(filesWithMarkers.map(async (file) => {
+      const context = await this.periodic.journalContextForFile(file);
+      if (!context) return null;
+      if (context.range.end.getTime() < window.start.getTime()) return null;
+      if (context.range.start.getTime() > window.end.getTime()) return null;
+      return { file, context };
+    }))).flatMap((candidate) => candidate ? [candidate] : []);
 
     // cachedRead is asynchronous. Parse independent periodic notes together so
     // one slow vault read does not serially delay the whole dashboard.
