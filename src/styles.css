@@ -1040,58 +1040,74 @@ button.property-logs-axis-cell:focus-visible {
   z-index: 20;
 }
 
-/* ─── Folded rows: one count per day ───────────────────────────────────────── */
+/* ─── Folded rows: compact note lanes ─────────────────────────────────────── */
 
-/* A folded row is a single line of days, each carrying how many notes sit
-   there and naming them on hover. Every count shares one subgroup, so they
-   stay on that line and overlap rather than stacking when a wide zoom presses
-   the days together. */
-.property-logs-timeline .vis-item.property-logs-day-count {
+/* Folding keeps each note's range visible. vis-timeline stacks each subgroup
+   as one compact lane, so the row grows only when ranges overlap in time. */
+.property-logs-timeline .vis-item.property-logs-folded-segment {
+  height: 10px;
   border: 0;
   overflow: visible;
   background: transparent;
   box-shadow: none;
-  /* As with the notes: the item's own line box would otherwise set the row's
-     height from the row's font rather than from the count itself. */
   font-size: 0;
   line-height: 0;
 }
 
-.property-logs-timeline .vis-item.vis-point.property-logs-day-count .vis-dot {
+.property-logs-timeline .vis-item.property-logs-folded-segment::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--property-logs-segment-color, var(--text-muted));
+  opacity: 0.9;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.property-logs-timeline .vis-item.property-logs-folded-segment::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -1px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.property-logs-timeline .vis-item.property-logs-folded-segment.is-ongoing::after {
+  width: 0;
+  height: 0;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  border-left: 5px solid var(--property-logs-segment-color, var(--text-muted));
+}
+
+.property-logs-timeline .vis-item.property-logs-folded-segment:not(.is-ongoing)::after {
+  width: 1px;
+  height: 7px;
+  border-radius: 1px;
+  background: var(--property-logs-segment-color, var(--text-muted));
+}
+
+.property-logs-timeline .vis-item.property-logs-folded-journal-line::after {
   display: none;
 }
 
-.property-logs-timeline .vis-item.property-logs-day-count .vis-item-content {
+.property-logs-folded-segment-button {
+  display: block;
+  width: 100%;
+  height: 10px;
   padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
 }
 
-/* The item starts at midday, so pulling the count back by half its own width
-   centres it in that day's column at any zoom. */
-.property-logs-day-count-badge {
-  display: inline-flex;
-  min-width: 0.95rem;
-  height: 0.95rem;
-  align-items: center;
-  justify-content: center;
-  padding: 0 3px;
-  border-radius: 999px;
-  background: var(--background-modifier-hover);
-  color: var(--text-muted);
-  font-family: var(--font-interface);
-  font-size: var(--property-logs-segment-font-size, 0.55rem);
-  font-weight: var(--font-semibold);
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-  transform: translateX(-50%);
-  cursor: default;
-}
-
-.property-logs-day-count-badge:hover {
-  background: var(--background-modifier-border-hover, var(--background-modifier-hover));
-  color: var(--text-normal);
-}
-
-.property-logs-timeline .vis-item.property-logs-day-count:hover {
+.property-logs-timeline .vis-item.property-logs-folded-segment:hover {
   z-index: 20;
 }
 

@@ -350,11 +350,11 @@ A note is its name in small type and a hairline in the note's colour running to 
 
 `status` keeps the familiar flat status rows. Grouping by a folder, level, `property:<key>`, or `file.tags` adds a foldable outer group, with foldable tracked-value/status rows inside it. For example, `groupBy: property:areas` draws `Personal → Active`, `Personal → Backlog`, and so on. A multi-value property places a note in each matching group; blank or missing values use **No value**. `file.tags` reads Obsidian’s file tags, while `property:tags` reads the literal frontmatter property.
 
-Every outer group and status subgroup carries a fold toggle. Folding collapses the rows underneath into a single line, which keeps a long dashboard readable while still showing where the activity is. Fold state is saved per dashboard, and the overflow menu can fold or unfold everything at once.
+Every outer group and status subgroup carries a fold toggle. Folding replaces the full note blocks with compact timeline lanes, which keeps a long dashboard readable while still showing each note's actual span. Fold state is saved per dashboard, and the overflow menu can fold or unfold everything at once.
 
-A folded row draws no notes. It carries one number per day instead — how many of that group's notes sit on that day — and hovering a number names them, along with the value each one held. Every count stays on the one line, so days that crowd together at a wide zoom overlap rather than growing the row back.
+A folded row draws one thin line per note range and puts overlapping ranges on separate lanes. Lanes are reused once a range ends, so a folded row grows only with the number of simultaneous notes. The line itself stays text-free; hover it to see the note name, value, and dates, and click it using the dashboard's normal open/edit gesture.
 
-The shared journal lane folds the same way, and its counts land in each day's own column rather than in the label: folded, the label keeps only its marker icon.
+The shared journal lane follows the same compact-line treatment when folded.
 
 ## Global value styles
 

@@ -120,11 +120,6 @@ interface PlanGroup {
  * One day of a folded row: how many notes sit there, and which. The set is
  * what stops a note that spans the day from being counted once per segment.
  */
-interface DayTally {
-  notes: string[];
-  counted: Set<string>;
-}
-
 /** Everything one drawn dashboard consists of, as plain data. */
 interface TimelineModel {
   items: PlanItem[];
@@ -274,29 +269,8 @@ const CURRENT_TODAY_OVERFLOW_DAYS = 3;
 /** Pixels between a note's name and the line that follows it. */
 const SEGMENT_LINE_GAP = 4;
 
-/** The one subgroup every day count is drawn in, which is what keeps them on a single line. */
-const DAY_COUNT_SUBGROUP = "day-counts";
-
-/** How many notes a day's hint names before it stops and counts the rest. */
-const DAY_COUNT_TOOLTIP_LIMIT = 12;
-
-/** A ceiling on the days one segment is walked over; a guard, not a design limit. */
-const MAX_COUNTED_DAYS = 4000;
-
 function centerOf(range: PeriodRange): Date {
   return new Date((range.start.getTime() + range.end.getTime()) / 2);
-}
-
-function startOfDay(date: Date): Date {
-  const day = new Date(date);
-  day.setHours(0, 0, 0, 0);
-  return day;
-}
-
-/** Noon of a day, so its count sits in the middle of that column at any zoom. */
-function middayOf(day: string): Date {
-  const [year, month, date] = day.split("-").map(Number);
-  return new Date(year, month - 1, date, 12);
 }
 
 /**
@@ -310,27 +284,6 @@ function middayOf(day: string): Date {
  */
 function isOngoingSegment(row: TimelineRow, segmentIndex: number): boolean {
   return segmentIndex === row.parsed.segments.length - 1 && row.parsed.currentLevel !== 0;
-}
-
-/**
- * The days one segment covers, as local dates.
- *
- * History segments are half-open — a value ends where the next one starts — so
- * the closing day belongs to the segment that follows it. The exception is the
- * value a note still holds, whose end is today and whose today counts.
- */
-function segmentDays(segment: TimelineSegment, isCurrent: boolean): string[] {
-  const days: string[] = [];
-  const cursor = startOfDay(segment.start);
-  const last = startOfDay(isCurrent ? segment.end : addDays(segment.end, -1));
-  while (cursor.getTime() <= last.getTime() && days.length < MAX_COUNTED_DAYS) {
-    days.push(localDate(cursor));
-    cursor.setDate(cursor.getDate() + 1);
-  }
-  // Two changes on one day leave a segment no days of its own; it still
-  // happened, so it is counted on the day it started.
-  if (days.length === 0) days.push(localDate(segment.start));
-  return days;
 }
 
 /**
@@ -1170,11 +1123,7 @@ export class DashboardTimeline {
             ),
           });
           if (folded) {
-            const tallies = new Map<string, DayTally>();
-            bucket.segments.forEach(({ row, segment, segmentIndex }) => {
-              this.tallySegment(tallies, row, segment, segmentIndex);
-            });
-            this.planDayCounts(model, groupId, tallies);
+            this.planFoldedSegments(model, groupId, dashboard, bucket.segments);
             return;
           }
           bucket.segments.forEach(({ row, segment, segmentIndex }) => {
@@ -1264,11 +1213,16 @@ export class DashboardTimeline {
           });
 
           if (parentFolded) {
-            const tallies = new Map<string, DayTally>();
-            bucketRows.forEach((row) => row.parsed.segments.forEach((segment, segmentIndex) => {
-              this.tallySegment(tallies, row, segment, segmentIndex);
-            }));
-            this.planDayCounts(model, parentId, tallies);
+            this.planFoldedSegments(
+              model,
+              parentId,
+              dashboard,
+              bucketRows.flatMap((row) => row.parsed.segments.map((segment, segmentIndex) => ({
+                row,
+                segment,
+                segmentIndex,
+              })))
+            );
             return;
           }
 
@@ -1292,11 +1246,7 @@ export class DashboardTimeline {
               ),
             });
             if (childFolded) {
-              const tallies = new Map<string, DayTally>();
-              statusBucket.segments.forEach(({ row, segment, segmentIndex }) => {
-                this.tallySegment(tallies, row, segment, segmentIndex);
-              });
-              this.planDayCounts(model, childId, tallies);
+              this.planFoldedSegments(model, childId, dashboard, statusBucket.segments);
               return;
             }
             statusBucket.segments.forEach(({ row, segment, segmentIndex }) => {
@@ -1711,84 +1661,70 @@ export class DashboardTimeline {
   }
 
   /**
-   * Adds one note's segment to a folded row's day counts, once per day it
-   * covers. A note that holds a value across a week is one note on each of
-   * those days, not seven.
+   * Collapses a group into compact note lanes rather than daily totals. The
+   * first available lane is reused after a range ends; only simultaneous
+   * ranges create another line and increase the folded row's height.
    */
-  private tallySegment(
-    tallies: Map<string, DayTally>,
-    row: TimelineRow,
-    segment: TimelineSegment,
-    segmentIndex: number
-  ): void {
-    const label = segment.value ? `${row.file.basename} — ${segment.value}` : row.file.basename;
-    segmentDays(segment, isOngoingSegment(row, segmentIndex)).forEach((day) => {
-      this.tallyDay(tallies, day, row.file.path, label);
-    });
-  }
-
-  private tallyDay(
-    tallies: Map<string, DayTally>,
-    day: string,
-    key: string,
-    label: string
-  ): void {
-    const tally = tallies.get(day) ?? { notes: [], counted: new Set<string>() };
-    if (!tally.counted.has(key)) {
-      tally.counted.add(key);
-      tally.notes.push(label);
-    }
-    tallies.set(day, tally);
-  }
-
-  /**
-   * Draws a folded row as a single line of days: one number per day saying how
-   * many notes sit there, and a hint naming them. The notes themselves are
-   * left out — collapsing the row to one line is what folding it now means.
-   *
-   * Every count shares one subgroup, which is what holds them to that line:
-   * vis-timeline stacks items within a group, but leaves a subgroup flat
-   * unless it is asked to stack, so days that crowd together at a wide zoom
-   * overlap instead of growing the row.
-   */
-  private planDayCounts(
+  private planFoldedSegments(
     model: TimelineModel,
     groupId: string,
-    tallies: Map<string, DayTally>
+    dashboard: DashboardSettings,
+    segments: Array<{ row: TimelineRow; segment: TimelineSegment; segmentIndex: number }>
   ): void {
-    tallies.forEach((tally, day) => {
-      const id = `${groupId}\u0000count:${day}`;
-      model.items.push({
-        id,
-        props: {
+    const laneEnds: Date[] = [];
+    [...segments]
+      .sort((first, second) =>
+        first.segment.start.getTime() - second.segment.start.getTime()
+        || first.segment.end.getTime() - second.segment.end.getTime()
+        || compareText(first.row.file.basename, second.row.file.basename)
+      )
+      .forEach(({ row, segment, segmentIndex }) => {
+        const isCurrent = isOngoingSegment(row, segmentIndex);
+        const end = this.segmentEnd(segment, isCurrent);
+        let lane = laneEnds.findIndex((laneEnd) => laneEnd.getTime() <= segment.start.getTime());
+        if (lane === -1) {
+          lane = laneEnds.length;
+          laneEnds.push(end);
+        } else {
+          laneEnds[lane] = end;
+        }
+        const id = `${groupId}\u0000${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`;
+        model.items.push({
           id,
-          group: groupId,
-          subgroup: DAY_COUNT_SUBGROUP,
-          start: middayOf(day),
-          type: "point",
-          selectable: false,
-          editable: false,
-          className: "property-logs-day-count",
-        },
-        contentKey: `count|${day}|${tally.notes.join("\u0001")}`,
-        createContent: () => this.createDayCountContent(day, tally.notes),
+          props: {
+            id,
+            group: groupId,
+            subgroup: `folded-lane:${lane}`,
+            subgroupOrder: lane,
+            start: segment.start,
+            end,
+            type: "range",
+            selectable: false,
+            editable: false,
+            className: `property-logs-folded-segment${isCurrent ? " is-ongoing" : ""}`,
+            style: timelineColorStyle(segment.color),
+          },
+          contentKey: [
+            "folded",
+            row.file.stat.mtime,
+            row.file.basename,
+            segment.value ?? "",
+            localDate(segment.start),
+            localDate(segment.end),
+            dashboard.noteOpenGesture,
+            lane,
+          ].join("|"),
+          createContent: () => this.createFoldedSegmentContent(row, dashboard, segment),
+        });
+        model.itemRows.set(id, row);
       });
-    });
   }
 
-  /** The number itself, with the day's notes behind it on hover. */
-  private createDayCountContent(day: string, notes: string[]): HTMLElement {
-    const badge = document.createElement("div");
-    badge.className = "property-logs-day-count-badge";
-    badge.setText(String(notes.length));
-    const named = notes.slice(0, DAY_COUNT_TOOLTIP_LIMIT);
-    const remaining = notes.length - named.length;
-    if (remaining > 0) named.push(`…and ${remaining} more`);
-    applyTooltip(badge, [
-      `${day} · ${notes.length} ${notes.length === 1 ? "note" : "notes"}`,
-      ...named,
-    ].join("\n"));
-    return badge;
+  private segmentEnd(segment: TimelineSegment, isCurrent: boolean): Date {
+    const startedToday = localDate(segment.start) === localDate(new Date());
+    return segment.end.getTime() > segment.start.getTime()
+      ? segment.end
+      : addDays(segment.start, isCurrent && startedToday ? CURRENT_TODAY_OVERFLOW_DAYS : 1);
   }
 
   private planSegmentItem(
@@ -1799,12 +1735,9 @@ export class DashboardTimeline {
     segmentIndex: number,
     groupId: string
   ): void {
-    const id = `${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`;
+    const id = `${groupId}\u0000${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`;
     const isCurrent = isOngoingSegment(row, segmentIndex);
-    const startedToday = localDate(segment.start) === localDate(new Date());
-    const end = segment.end.getTime() > segment.start.getTime()
-      ? segment.end
-      : addDays(segment.start, isCurrent && startedToday ? CURRENT_TODAY_OVERFLOW_DAYS : 1);
+    const end = this.segmentEnd(segment, isCurrent);
     // Every note reads as its name and a line, ending in an arrow while the
     // value is still the note's current one. Names that would collide stack,
     // so a row grows only as far as its notes need.
@@ -1866,7 +1799,7 @@ export class DashboardTimeline {
     const markers = this.host.getJournalMarkers();
     const laneId = "journal:lane";
     const laneFolded = this.isFolded(dashboard, laneId);
-    const laneTallies = new Map<string, DayTally>();
+    const foldedLaneNotes: Array<{ note: JournalNote; style: JournalMarkerStyle }> = [];
     let laneCount = 0;
 
     notes.forEach((note) => {
@@ -1879,15 +1812,8 @@ export class DashboardTimeline {
         : laneId;
       if (groupId === laneId) {
         laneCount++;
-        // A folded lane draws its notes as a count in each day's own column
-        // rather than as pills along the row.
         if (laneFolded) {
-          this.tallyDay(
-            laneTallies,
-            localDate(centerOf(note.range)),
-            note.id,
-            plainNoteText(note.text)
-          );
+          foldedLaneNotes.push({ note, style });
           return;
         }
       }
@@ -1918,7 +1844,7 @@ export class DashboardTimeline {
     });
 
     if (laneCount > 0) {
-      this.planDayCounts(model, laneId, laneTallies);
+      if (laneFolded) this.planFoldedJournalLines(model, laneId, foldedLaneNotes);
       model.groupLabelText.set(laneId, `Journal notes · ${laneCount}`);
       model.groups.unshift({
         id: laneId,
@@ -1938,6 +1864,48 @@ export class DashboardTimeline {
         ),
       });
     }
+  }
+
+  /** Folded journal notes use the same compact lane treatment as status notes. */
+  private planFoldedJournalLines(
+    model: TimelineModel,
+    groupId: string,
+    notes: Array<{ note: JournalNote; style: JournalMarkerStyle }>
+  ): void {
+    const laneEnds: Date[] = [];
+    [...notes]
+      .sort((first, second) => first.note.range.start.getTime() - second.note.range.start.getTime())
+      .forEach(({ note, style }) => {
+        const end = note.range.end.getTime() > note.range.start.getTime()
+          ? note.range.end
+          : addDays(note.range.start, 1);
+        let lane = laneEnds.findIndex((laneEnd) => laneEnd.getTime() <= note.range.start.getTime());
+        if (lane === -1) {
+          lane = laneEnds.length;
+          laneEnds.push(end);
+        } else {
+          laneEnds[lane] = end;
+        }
+        model.items.push({
+          id: note.id,
+          props: {
+            id: note.id,
+            group: groupId,
+            subgroup: `folded-lane:${lane}`,
+            subgroupOrder: lane,
+            start: note.range.start,
+            end,
+            type: "range",
+            selectable: false,
+            editable: false,
+            className: "property-logs-folded-segment property-logs-folded-journal-line",
+            style: timelineColorStyle(style.color),
+          },
+          contentKey: `folded-journal|${note.marker}|${note.text}|${localDate(note.range.start)}|${lane}`,
+          createContent: () => this.createFoldedJournalContent(note, style),
+        });
+        model.journalNotes.set(note.id, note);
+      });
   }
 
   /**
@@ -1991,6 +1959,18 @@ export class DashboardTimeline {
     const icon = content.createSpan({ cls: "property-logs-journal-icon" });
     setIcon(icon, style.icon);
     content.createSpan({ text, cls: "property-logs-journal-text" });
+    content.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.activateJournalNote(note, event);
+    });
+    return content;
+  }
+
+  private createFoldedJournalContent(note: JournalNote, style: JournalMarkerStyle): HTMLElement {
+    const content = document.createElement("button");
+    content.type = "button";
+    content.className = "property-logs-folded-segment-button";
+    applyTooltip(content, `${style.label} · ${localDate(note.range.start)}\n${plainNoteText(note.text)}`);
     content.addEventListener("click", (event) => {
       event.stopPropagation();
       this.activateJournalNote(note, event);
@@ -2117,6 +2097,36 @@ export class DashboardTimeline {
       row.file.basename,
       `${segment.value ?? "Unset"} · ${localDate(segment.start)} → ${localDate(segment.end)}`,
       ...meta,
+      primaryAction,
+    ].join("\n"));
+    content.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.activateTimelineBlock(row, dashboard, event);
+    });
+    content.addEventListener("contextmenu", (event) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.activateTimelineBlock(row, dashboard, event);
+    });
+    return content;
+  }
+
+  /** A folded lane stays visually quiet; its note name belongs in the hint. */
+  private createFoldedSegmentContent(
+    row: TimelineRow,
+    dashboard: DashboardSettings,
+    segment: TimelineSegment
+  ): HTMLElement {
+    const content = document.createElement("button");
+    content.type = "button";
+    content.className = "property-logs-folded-segment-button";
+    const primaryAction = dashboard.noteOpenGesture === "click"
+      ? "Click to open note; Ctrl-click to change value."
+      : "Click to change value; Ctrl-click to open note.";
+    applyTooltip(content, [
+      row.file.basename,
+      `${segment.value ?? "Unset"} · ${localDate(segment.start)} → ${localDate(segment.end)}`,
       primaryAction,
     ].join("\n"));
     content.addEventListener("click", (event) => {
