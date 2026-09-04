@@ -47,15 +47,69 @@ interface JournalsApi {
 
 const DAY_MS = 1000 * 60 * 60 * 24;
 
+/** How long a Journals configuration lookup is trusted before it is asked again. */
+const GRANULARITY_TTL_MS = 60_000;
+
+interface CachedContext {
+  mtime: number;
+  context: Promise<PeriodicNoteContext | null>;
+}
+
 /**
  * Resolves periodic notes through the Journals plugin when it is available and
  * falls back to frontmatter, file names, and the core Daily Notes plugin.
  */
 export class PeriodicNotes {
+  /**
+   * Resolved contexts, per note. The Journals plugin answers `journalOf`
+   * asynchronously, and a dashboard asks it for every candidate periodic note
+   * on every render, so the uncached round-trips are what keeps journal notes
+   * arriving late. Entries are stamped with the note's mtime and dropped by
+   * path when it changes; the plugin invalidates the lot when the periodic
+   * configuration itself moves.
+   */
+  private readonly contexts = new Map<string, CachedContext>();
+  private readonly journalContexts = new Map<string, CachedContext>();
+  private granularities: { at: number; value: Promise<Set<PeriodGranularity>> } | null = null;
+
   constructor(
     private readonly app: App,
     private readonly getConfig: () => PeriodicNotesConfig
   ) {}
+
+  /** Drops one note's resolved context, or every one of them. */
+  invalidate(path?: string): void {
+    if (path) {
+      this.contexts.delete(path);
+      this.journalContexts.delete(path);
+      return;
+    }
+    this.contexts.clear();
+    this.journalContexts.clear();
+    this.granularities = null;
+  }
+
+  /**
+   * The cached answer for one note, or a fresh lookup.
+   *
+   * The in-flight promise itself is what gets stored, so the burst of embeds
+   * that all open on the same note resolve it once between them rather than
+   * once each.
+   */
+  private resolveCached(
+    store: Map<string, CachedContext>,
+    file: TFile,
+    compute: () => Promise<PeriodicNoteContext | null>
+  ): Promise<PeriodicNoteContext | null> {
+    const cached = store.get(file.path);
+    if (cached && cached.mtime === file.stat.mtime) return cached.context;
+    const context = compute().catch((error) => {
+      console.error(`Property Logs: could not resolve the period of ${file.path}`, error);
+      return null;
+    });
+    store.set(file.path, { mtime: file.stat.mtime, context });
+    return context;
+  }
 
   private api(): JournalsApi | null {
     const plugin = (this.app as any).plugins?.plugins?.journals;
@@ -81,17 +135,23 @@ export class PeriodicNotes {
   }
 
   /** Full resolution, preferring the Journals index over heuristics. */
-  async contextForFile(file: TFile): Promise<PeriodicNoteContext | null> {
-    const journalContext = await this.contextFromJournals(file);
-    if (journalContext) return journalContext;
-    return this.contextForFileSync(file);
+  contextForFile(file: TFile): Promise<PeriodicNoteContext | null> {
+    return this.resolveCached(this.contexts, file, async () => {
+      const journalContext = await this.contextFromJournals(file);
+      if (journalContext) return journalContext;
+      return this.contextForFileSync(file);
+    });
   }
 
   /**
    * Strict eligibility for checkbox annotations. A note merely mentioning a
    * date, or having one in its filename, is not automatically a journal.
    */
-  async journalContextForFile(file: TFile): Promise<PeriodicNoteContext | null> {
+  journalContextForFile(file: TFile): Promise<PeriodicNoteContext | null> {
+    return this.resolveCached(this.journalContexts, file, () => this.resolveJournalContext(file));
+  }
+
+  private async resolveJournalContext(file: TFile): Promise<PeriodicNoteContext | null> {
     const journalContext = await this.contextFromJournals(file);
     if (journalContext) return journalContext;
 
@@ -112,8 +172,23 @@ export class PeriodicNotes {
     return this.dailyNoteContextForFile(file);
   }
 
-  /** Granularities that have a journal (or a daily note) to open. */
-  async availableGranularities(): Promise<Set<PeriodGranularity>> {
+  /**
+   * Granularities that have a journal (or a daily note) to open.
+   *
+   * Every render asks, and the answer changes only when the user reconfigures
+   * Journals, so it is held for a minute rather than fetched per dashboard.
+   */
+  availableGranularities(): Promise<Set<PeriodGranularity>> {
+    const now = Date.now();
+    if (this.granularities && now - this.granularities.at < GRANULARITY_TTL_MS) {
+      return this.granularities.value;
+    }
+    const value = this.listGranularities();
+    this.granularities = { at: now, value };
+    return value;
+  }
+
+  private async listGranularities(): Promise<Set<PeriodGranularity>> {
     const available = new Set<PeriodGranularity>(["day"]);
     const api = this.api();
     if (!api) return available;

@@ -6,10 +6,18 @@ import {
   setIcon,
 } from "obsidian";
 
-import { parseEmbedOptions } from "../data/embedOptions";
+import { EmbedOptions, parseEmbedOptions } from "../data/embedOptions";
 import { periodRange, periodTitle } from "../data/periodic";
 import { PeriodicNoteContext } from "../integrations/periodicNotes";
 import { DashboardHost, DashboardTimeline } from "./DashboardTimeline";
+import { applyTooltip } from "./tooltips";
+
+/** Heights a compact timeline settles at, mirrored from DashboardTimeline. */
+const DEFAULT_EMBED_HEIGHT = 420;
+const MINIMAL_EMBED_HEIGHT = 220;
+
+/** How far ahead of the viewport an embed starts building itself. */
+const PRERENDER_MARGIN_PX = 600;
 
 /**
  * Renders a dashboard inside a note from a ```property-logs code block.
@@ -22,7 +30,10 @@ import { DashboardHost, DashboardTimeline } from "./DashboardTimeline";
 export class DashboardEmbed extends MarkdownRenderChild {
   private timeline: DashboardTimeline | null = null;
   private resizeObserver: ResizeObserver | null = null;
+  private visibilityObserver: IntersectionObserver | null = null;
   private rendered = false;
+  private unloaded = false;
+  private options: EmbedOptions | null = null;
 
   constructor(
     private readonly app: App,
@@ -45,17 +56,27 @@ export class DashboardEmbed extends MarkdownRenderChild {
     this.registerDomEvent(this.containerEl, "contextmenu", (event) => {
       if (event.ctrlKey) event.stopPropagation();
     });
+    this.options = parseEmbedOptions(this.source);
+    // Building the dashboard means resolving the host note's period through
+    // the Journals plugin and then laying out every block, so the skeleton
+    // goes up first, at the height the finished timeline will take. A note
+    // holding several embeds then reads immediately, and nothing under them
+    // moves as each one fills in.
+    this.renderPlaceholder();
     // Virtual Content and collapsed sections can render this block while it is
-    // detached or zero-width, which vis-timeline cannot measure. Wait for real
-    // width before building, then keep the timeline in sync with the note.
-    if (this.containerEl.clientWidth > 0) await this.renderEmbed();
-    else this.renderPlaceholder();
+    // detached or zero-width, which vis-timeline cannot measure, so the build
+    // waits for real width — and, for an embed further down a long note, for
+    // the reader to come near it.
+    this.observeVisibility();
     this.observeSize();
   }
 
   onunload(): void {
+    this.unloaded = true;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.visibilityObserver?.disconnect();
+    this.visibilityObserver = null;
     this.timeline?.destroy();
     this.timeline = null;
   }
@@ -68,13 +89,45 @@ export class DashboardEmbed extends MarkdownRenderChild {
     if (typeof ResizeObserver === "undefined") return;
     this.resizeObserver = new ResizeObserver(() => {
       if (this.rendered || this.containerEl.clientWidth <= 0) return;
+      if (this.visibilityObserver && !this.isNearViewport()) return;
       void this.renderEmbed();
     });
     this.resizeObserver.observe(this.containerEl);
   }
 
+  /**
+   * Holds an off-screen embed at its reserved height until the reader
+   * approaches it. Without IntersectionObserver — and in a printed or exported
+   * note — every embed builds as soon as it has width, as it always did.
+   */
+  private observeVisibility(): void {
+    if (typeof IntersectionObserver === "undefined") {
+      if (this.containerEl.clientWidth > 0) void this.renderEmbed();
+      return;
+    }
+    this.visibilityObserver = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      if (this.rendered || this.containerEl.clientWidth <= 0) return;
+      void this.renderEmbed();
+    }, { rootMargin: `${PRERENDER_MARGIN_PX}px 0px` });
+    this.visibilityObserver.observe(this.containerEl);
+  }
+
+  private isNearViewport(): boolean {
+    const bounds = this.containerEl.getBoundingClientRect();
+    return bounds.bottom >= -PRERENDER_MARGIN_PX
+      && bounds.top <= window.innerHeight + PRERENDER_MARGIN_PX;
+  }
+
+  /** The height the finished timeline will take, held while it is built. */
+  private reservedHeight(): number {
+    if (this.options?.height) return this.options.height;
+    return this.options?.minimal ? MINIMAL_EMBED_HEIGHT : DEFAULT_EMBED_HEIGHT;
+  }
+
   private renderPlaceholder(): void {
     this.containerEl.empty();
+    this.containerEl.style.minHeight = `${this.reservedHeight()}px`;
     const placeholder = this.containerEl.createDiv({ cls: "property-logs-loading" });
     for (let line = 0; line < 2; line++) {
       placeholder.createDiv({ cls: "property-logs-loading-line" });
@@ -83,8 +136,15 @@ export class DashboardEmbed extends MarkdownRenderChild {
 
   private async renderEmbed(): Promise<void> {
     this.rendered = true;
-    const options = parseEmbedOptions(this.source);
+    this.visibilityObserver?.disconnect();
+    this.visibilityObserver = null;
+    const options = this.options ?? parseEmbedOptions(this.source);
+    // The context lookup below can wait on the Journals plugin, so the
+    // skeleton stays up until there is a timeline to put in its place.
+    const context = await this.resolveContext(options.date, options.period);
+    if (this.unloaded) return;
     this.containerEl.empty();
+    this.containerEl.style.removeProperty("min-height");
 
     const dashboards = this.host.getDashboards();
     if (dashboards.length === 0) {
@@ -107,18 +167,14 @@ export class DashboardEmbed extends MarkdownRenderChild {
       options.errors.forEach((error) => warning.createDiv({ text: error }));
     }
 
-    const context = await this.resolveContext(options.date, options.period);
     const embedBody = this.containerEl.createDiv({ cls: "property-logs-embed-body" });
     const timelineEl = embedBody.createDiv({ cls: "property-logs-embed-timeline" });
     if (options.minimal) {
       const openDashboard = embedBody.createEl("button", {
         cls: "property-logs-minimal-open-dashboard clickable-icon",
-        attr: {
-          type: "button",
-          "aria-label": `Open ${dashboard.name} dashboard`,
-          title: `Open ${dashboard.name} dashboard`,
-        },
+        attr: { type: "button" },
       });
+      applyTooltip(openDashboard, `Open ${dashboard.name} dashboard`, "left");
       setIcon(openDashboard, "maximize-2");
       openDashboard.addEventListener("click", (event) => {
         event.preventDefault();

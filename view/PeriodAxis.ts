@@ -8,6 +8,7 @@ import {
   periodBoundaries,
   periodTitle,
 } from "../data/periodic";
+import { applyTooltip } from "./tooltips";
 
 export interface PeriodAxisOptions {
   weekStartsOn: number;
@@ -126,10 +127,15 @@ export class PeriodAxis {
 
       const cell = row.createEl(openable ? "button" : "div", {
         cls: "property-logs-axis-cell",
-        attr: openable
-          ? { type: "button", title: `Open ${periodTitle(granularity, start)}` }
-          : { title: periodTitle(granularity, start) },
+        attr: openable ? { type: "button" } : {},
       });
+      applyTooltip(
+        cell,
+        openable
+          ? `Open ${periodTitle(granularity, start)}`
+          : periodTitle(granularity, start),
+        "bottom"
+      );
       cell.style.left = `${left}px`;
       cell.style.width = `${cellWidth}px`;
       cell.toggleClass("is-today", start.getTime() === todayRange.start.getTime());

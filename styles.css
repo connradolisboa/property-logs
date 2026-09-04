@@ -1424,43 +1424,60 @@ button.property-logs-palette-swatch:focus-visible {
   outline-offset: 2px;
   box-shadow: none;
 }
+.property-logs-timeline .vis-item.property-logs-segment {
+  border-radius: 0;
+  font-size: 0;
+  line-height: 0;
+}
 .property-logs-timeline .vis-item.property-logs-segment .vis-item-content {
   padding: 0;
+  vertical-align: top;
 }
-.property-logs-timeline .vis-item.property-logs-segment:not(.is-folded) .vis-item-overflow {
+.property-logs-timeline .vis-item.property-logs-segment .vis-item-overflow {
   overflow: visible;
 }
 .property-logs-segment-button {
+  position: relative;
+  z-index: 1;
   display: flex;
   width: auto;
-  min-height: 1.25rem;
+  max-width: 10rem;
+  min-height: 0;
   align-items: center;
-  gap: var(--size-4-1, 4px);
-  padding: 0 var(--size-4-2, 8px);
-  overflow: visible;
+  gap: 3px;
+  padding: 0 2px;
+  overflow: hidden;
   border: 0;
-  border-radius: inherit;
-  background: var(--property-logs-segment-color, var(--interactive-accent));
-  color: inherit;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-normal);
   box-shadow: none;
   font: inherit;
-  font-weight: var(--font-medium);
+  font-size: var(--property-logs-segment-font-size, 0.55rem);
+  font-weight: var(--font-semibold);
+  line-height: 1.3;
+  letter-spacing: -0.005em;
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
-  transition: opacity 120ms ease;
+  transition: none;
 }
 .property-logs-segment-title,
 .property-logs-segment-meta {
   white-space: nowrap;
 }
 .property-logs-segment-title {
+  overflow: hidden;
   font-weight: var(--font-semibold);
+  text-overflow: ellipsis;
 }
 .property-logs-segment-meta {
+  display: none;
+  overflow: hidden;
   opacity: 0.78;
   font-size: 0.9em;
   font-weight: var(--font-normal);
+  text-overflow: ellipsis;
 }
 .property-logs-timeline .vis-panel.vis-center {
   cursor: grab;
@@ -1469,16 +1486,20 @@ button.property-logs-palette-swatch:focus-visible {
   cursor: grabbing;
 }
 .property-logs-segment-button:hover,
-.property-logs-segment-button:active {
-  border: 0;
-  background: var(--property-logs-segment-color, var(--interactive-accent));
-  box-shadow: none;
+.property-logs-segment-button:active,
+.property-logs-segment-button:focus-visible {
+  max-width: 26rem;
+  padding: 0 var(--size-4-1, 4px);
+  gap: var(--size-4-1, 4px);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s, 0 1px 4px rgba(0, 0, 0, 0.3));
+  color: var(--text-normal);
+  font-size: 0.7rem;
+  opacity: 1;
 }
-.property-logs-segment-button:hover {
-  opacity: 0.88;
-}
-.property-logs-segment-button:active {
-  opacity: 0.72;
+.property-logs-segment-button:hover .property-logs-segment-meta,
+.property-logs-segment-button:focus-visible .property-logs-segment-meta {
+  display: inline;
 }
 .property-logs-segment-button:focus-visible,
 .property-logs-row-title:focus-visible,
@@ -1593,8 +1614,14 @@ button.property-logs-palette-swatch:focus-visible {
 }
 @media (prefers-reduced-motion: reduce) {
   .property-logs-segment-button,
+  .property-logs-journal-button,
+  .property-logs-timeline-wrapper,
+  .property-logs-timeline .vis-item,
   .status-history-tab-btn {
     transition: none;
+  }
+  .property-logs-timeline-wrapper {
+    opacity: 1;
   }
 }
 .property-logs-dashboard {
@@ -1613,6 +1640,16 @@ button.property-logs-palette-swatch:focus-visible {
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
+  opacity: 0;
+  transition: opacity 130ms ease;
+}
+.property-logs-timeline-wrapper.is-ready {
+  opacity: 1;
+}
+.tooltip.property-logs-tooltip {
+  max-width: min(24rem, 80vw);
+  text-align: left;
+  white-space: pre-line;
 }
 .property-logs-axis {
   flex: 0 0 auto;
@@ -1700,6 +1737,9 @@ button.property-logs-axis-cell:focus-visible {
 .property-logs-timeline .vis-item.property-logs-segment {
   z-index: 1;
 }
+.property-logs-timeline .vis-item {
+  transition: top 150ms ease;
+}
 .property-logs-timeline .vis-item.property-logs-journal-note {
   z-index: 2;
 }
@@ -1750,20 +1790,84 @@ button.property-logs-axis-cell:focus-visible {
 .property-logs-group-label.is-folded .property-logs-status-name {
   color: var(--text-muted);
 }
-.property-logs-segment-button.is-folded {
-  max-width: 22rem;
-  padding: 0 var(--size-4-1, 4px);
-  gap: var(--size-4-1, 4px);
-  overflow: hidden;
-  font-size: var(--font-ui-smaller);
+.property-logs-timeline .vis-item.property-logs-segment::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: 50%;
+  left: var(--property-logs-line-start, 0px);
+  width: max(0px, calc(var(--property-logs-line-end, 100%) - var(--property-logs-line-start, 0px)));
+  height: 1px;
+  border-radius: 1px;
+  background: var(--property-logs-segment-color, var(--text-muted));
+  opacity: 0.85;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
-.property-logs-segment-button.is-folded .property-logs-segment-title,
-.property-logs-segment-button.is-folded .property-logs-segment-meta {
-  overflow: hidden;
-  text-overflow: ellipsis;
+.property-logs-timeline .vis-item.property-logs-segment::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: 50%;
+  left: var(--property-logs-line-end, 100%);
+  opacity: 0.95;
+  transform: translate(-1px, -50%);
+  pointer-events: none;
 }
-.property-logs-timeline .vis-item.property-logs-segment.is-folded {
-  border-radius: var(--radius-s, 4px);
+.property-logs-timeline .vis-item.property-logs-segment.is-ongoing::after {
+  width: 0;
+  height: 0;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  border-left: 5px solid var(--property-logs-segment-color, var(--text-muted));
+}
+.property-logs-timeline .vis-item.property-logs-segment:not(.is-ongoing)::after {
+  width: 1px;
+  height: 7px;
+  border-radius: 1px;
+  background: var(--property-logs-segment-color, var(--text-muted));
+}
+.property-logs-timeline .vis-item.property-logs-segment:hover {
+  z-index: 20;
+}
+.property-logs-timeline .vis-item.property-logs-day-count {
+  border: 0;
+  overflow: visible;
+  background: transparent;
+  box-shadow: none;
+  font-size: 0;
+  line-height: 0;
+}
+.property-logs-timeline .vis-item.vis-point.property-logs-day-count .vis-dot {
+  display: none;
+}
+.property-logs-timeline .vis-item.property-logs-day-count .vis-item-content {
+  padding: 0;
+}
+.property-logs-day-count-badge {
+  display: inline-flex;
+  min-width: 0.95rem;
+  height: 0.95rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  font-family: var(--font-interface);
+  font-size: var(--property-logs-segment-font-size, 0.55rem);
+  font-weight: var(--font-semibold);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  transform: translateX(-50%);
+  cursor: default;
+}
+.property-logs-day-count-badge:hover {
+  background: var(--background-modifier-border-hover, var(--background-modifier-hover));
+  color: var(--text-normal);
+}
+.property-logs-timeline .vis-item.property-logs-day-count:hover {
+  z-index: 20;
 }
 .property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-labelset .vis-label .vis-inner {
   width: 0;
@@ -1852,6 +1956,9 @@ button.property-logs-axis-cell:focus-visible {
   background: var(--background-modifier-hover);
   box-shadow: none;
 }
+.property-logs-timeline .vis-item.property-logs-journal-note:hover {
+  z-index: 20;
+}
 .property-logs-journal-icon {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1869,14 +1976,32 @@ button.property-logs-axis-cell:focus-visible {
 }
 .property-logs-journal-lane-label {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: var(--size-4-1, 4px);
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  line-height: 1.3;
+}
+.property-logs-journal-lane-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.property-logs-journal-lane-label.is-folded {
+  gap: 3px;
+  font-size: 0.62rem;
+}
+.property-logs-journal-lane-label.is-folded .property-logs-journal-lane-name {
+  display: none;
 }
 .property-logs-journal-lane-icon svg {
   width: var(--icon-xs);
   height: var(--icon-xs);
+}
+.property-logs-journal-lane-label.is-folded .property-logs-journal-lane-icon svg {
+  width: 0.7rem;
+  height: 0.7rem;
 }
 .property-logs-timeline .vis-label.property-logs-journal-lane {
   background: var(--background-secondary-alt, var(--background-secondary));
@@ -1986,7 +2111,6 @@ button.property-logs-axis-cell:focus-visible {
 .property-logs-dashboard.is-minimal .vis-labelset .vis-label .vis-inner {
   padding: 0 var(--size-4-1, 4px);
 }
-.property-logs-dashboard.is-minimal .property-logs-segment-button,
 .property-logs-dashboard.is-minimal .property-logs-row-title {
   min-height: 1rem;
   padding: 0 var(--size-4-1, 4px);
@@ -1999,6 +2123,18 @@ button.property-logs-axis-cell:focus-visible {
 .property-logs-dashboard.is-minimal .property-logs-segment-meta,
 .property-logs-dashboard.is-minimal .property-logs-row-metadata {
   display: none;
+}
+.property-logs-dashboard.is-minimal {
+  --property-logs-segment-font-size: 0.5rem;
+}
+.property-logs-dashboard.is-minimal .property-logs-segment-button:hover,
+.property-logs-dashboard.is-minimal .property-logs-segment-button:focus-visible {
+  padding: 0 var(--size-4-1, 4px);
+  font-size: 0.7rem;
+}
+.property-logs-dashboard.is-minimal .property-logs-segment-button:hover .property-logs-segment-meta,
+.property-logs-dashboard.is-minimal .property-logs-segment-button:focus-visible .property-logs-segment-meta {
+  display: inline;
 }
 .property-logs-dashboard.is-minimal .vis-time-axis .vis-text {
   font-size: 0.65rem;
@@ -2027,9 +2163,11 @@ input.property-logs-marker-icon-input {
   min-width: 2.25rem;
   min-height: 2.25rem;
 }
-.property-logs-dashboard.is-mobile-layout .property-logs-journal-button,
-.property-logs-dashboard.is-mobile-layout .property-logs-segment-button {
+.property-logs-dashboard.is-mobile-layout .property-logs-journal-button {
   min-height: 1.75rem;
+}
+.property-logs-dashboard.is-mobile-layout {
+  --property-logs-segment-font-size: 0.65rem;
 }
 .property-logs-dashboard.is-mobile-layout .property-logs-timeline-wrapper {
   --property-logs-axis-height: 3rem;

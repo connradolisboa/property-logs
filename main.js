@@ -23,7 +23,7 @@ __export(main_exports, {
   default: () => PropertyLogsPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian11 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 
 // data/colorPalette.ts
 var COLOR_PALETTE = [
@@ -251,6 +251,48 @@ function displayPropertyValue(value) {
   return scalarValues(value).join(", ");
 }
 
+// data/dashboardCache.ts
+var DashboardDataCache = class {
+  constructor() {
+    this.generation = 0;
+    this.scans = /* @__PURE__ */ new Map();
+    this.files = /* @__PURE__ */ new Map();
+  }
+  /** Everything is stale: the file list changed, or a setting behind it did. */
+  invalidateAll() {
+    this.generation++;
+    this.scans.clear();
+    this.files.clear();
+  }
+  /** One note changed: its own results go, the vault-wide scans go, the rest stays. */
+  invalidateFile(path2) {
+    this.generation++;
+    this.scans.clear();
+    this.files.delete(path2);
+  }
+  /** A vault-wide result, recomputed once per change to the vault. */
+  scan(key, compute) {
+    const cached = this.scans.get(key);
+    if (cached && cached.generation === this.generation) return cached.value;
+    const value = compute();
+    this.scans.set(key, { generation: this.generation, value });
+    return value;
+  }
+  /** A per-file result, recomputed when that file is written or `key` changes. */
+  forFile(namespace, file, key, compute) {
+    let entries2 = this.files.get(file.path);
+    const cached = entries2?.get(namespace);
+    if (cached && cached.mtime === file.stat.mtime && cached.key === key) return cached.value;
+    const value = compute();
+    if (!entries2) {
+      entries2 = /* @__PURE__ */ new Map();
+      this.files.set(file.path, entries2);
+    }
+    entries2.set(namespace, { mtime: file.stat.mtime, key, value });
+    return value;
+  }
+};
+
 // data/historyCompatibility.ts
 var KNOWN_HISTORY_SOURCES = [
   { historyKey: "statusHistory", dateKey: "dateSet" },
@@ -291,9 +333,9 @@ function collectCompatibleHistory(frontmatter, configuredHistoryKey, configuredD
       const dateValue = rawEntry[source.dateKey] ?? rawEntry[configuredDateKey];
       if (dateValue !== void 0) normalized[configuredDateKey] = dateValue;
       if (source.dateKey !== configuredDateKey) delete normalized[source.dateKey];
-      const signature = canonicalEntry(normalized);
-      if (seenEntries.has(signature)) continue;
-      seenEntries.add(signature);
+      const signature2 = canonicalEntry(normalized);
+      if (seenEntries.has(signature2)) continue;
+      seenEntries.add(signature2);
       entries2.push(normalized);
     }
   }
@@ -608,25 +650,52 @@ function knownValues(styles, ...mappings) {
 }
 
 // integrations/journalNotes.ts
+function signature(notes) {
+  return notes.map((note) => `${note.line}\0${note.marker}\0${note.text}\0${note.links.join(",")}`).join("");
+}
 var JournalNoteIndex = class {
   constructor(app, periodic, getMarkers) {
     this.app = app;
     this.periodic = periodic;
     this.getMarkers = getMarkers;
     this.cache = /* @__PURE__ */ new Map();
+    /**
+     * The notes that carry a marker at all, from one walk of the vault. Several
+     * dashboards collecting for their own windows share this walk, and it is
+     * dropped whenever any note changes.
+     */
+    this.markerFiles = null;
   }
   invalidate(path2) {
+    this.markerFiles = null;
     if (path2) this.cache.delete(path2);
     else this.cache.clear();
+  }
+  /**
+   * Re-reads one note and reports whether its marked lines actually changed.
+   *
+   * Obsidian writes a note to disk while it is still being typed in, so a
+   * dashboard that rebuilt on every write would flicker through a sentence.
+   * Comparing the parsed lines lets the common edit — typing anywhere that is
+   * not a marked line — leave every open timeline untouched.
+   */
+  async syncFile(file) {
+    const previous = this.cache.get(file.path);
+    this.cache.delete(file.path);
+    this.markerFiles = null;
+    const markers = this.getMarkers();
+    if (markers.length === 0) return previous !== void 0 && previous.notes.length > 0;
+    const wanted = new Set(markers.map((style) => style.marker));
+    const hasMarkers = this.app.metadataCache.getFileCache(file)?.listItems?.some((item) => item.task !== void 0 && wanted.has(item.task)) ?? false;
+    if (!hasMarkers) return previous !== void 0 && previous.notes.length > 0;
+    const notes = await this.parseFile(file, wanted);
+    return signature(previous?.notes ?? []) !== signature(notes);
   }
   async collect(window2) {
     const markers = this.getMarkers();
     if (markers.length === 0) return [];
     const wanted = new Set(markers.map((style) => style.marker));
-    const filesWithMarkers = this.app.vault.getMarkdownFiles().filter((file) => {
-      const listItems = this.app.metadataCache.getFileCache(file)?.listItems;
-      return listItems?.some((item) => item.task !== void 0 && wanted.has(item.task)) ?? false;
-    });
+    const filesWithMarkers = this.filesWithMarkers(wanted);
     const candidates = (await Promise.all(filesWithMarkers.map(async (file) => {
       const context = await this.periodic.journalContextForFile(file);
       if (!context) return null;
@@ -649,6 +718,16 @@ var JournalNoteIndex = class {
       granularity: context.granularity,
       range: context.range
     })));
+  }
+  filesWithMarkers(wanted) {
+    const key = Array.from(wanted).sort().join(",");
+    if (this.markerFiles && this.markerFiles.key === key) return this.markerFiles.files;
+    const files = this.app.vault.getMarkdownFiles().filter((file) => {
+      const listItems = this.app.metadataCache.getFileCache(file)?.listItems;
+      return listItems?.some((item) => item.task !== void 0 && wanted.has(item.task)) ?? false;
+    });
+    this.markerFiles = { key, files };
+    return files;
   }
   async parseFile(file, wanted) {
     const cached = this.cache.get(file.path);
@@ -767,10 +846,50 @@ function contextFromFrontmatter(frontmatter, config) {
 
 // integrations/periodicNotes.ts
 var DAY_MS3 = 1e3 * 60 * 60 * 24;
+var GRANULARITY_TTL_MS = 6e4;
 var PeriodicNotes = class {
   constructor(app, getConfig) {
     this.app = app;
     this.getConfig = getConfig;
+    /**
+     * Resolved contexts, per note. The Journals plugin answers `journalOf`
+     * asynchronously, and a dashboard asks it for every candidate periodic note
+     * on every render, so the uncached round-trips are what keeps journal notes
+     * arriving late. Entries are stamped with the note's mtime and dropped by
+     * path when it changes; the plugin invalidates the lot when the periodic
+     * configuration itself moves.
+     */
+    this.contexts = /* @__PURE__ */ new Map();
+    this.journalContexts = /* @__PURE__ */ new Map();
+    this.granularities = null;
+  }
+  /** Drops one note's resolved context, or every one of them. */
+  invalidate(path2) {
+    if (path2) {
+      this.contexts.delete(path2);
+      this.journalContexts.delete(path2);
+      return;
+    }
+    this.contexts.clear();
+    this.journalContexts.clear();
+    this.granularities = null;
+  }
+  /**
+   * The cached answer for one note, or a fresh lookup.
+   *
+   * The in-flight promise itself is what gets stored, so the burst of embeds
+   * that all open on the same note resolve it once between them rather than
+   * once each.
+   */
+  resolveCached(store, file, compute) {
+    const cached = store.get(file.path);
+    if (cached && cached.mtime === file.stat.mtime) return cached.context;
+    const context = compute().catch((error) => {
+      console.error(`Property Logs: could not resolve the period of ${file.path}`, error);
+      return null;
+    });
+    store.set(file.path, { mtime: file.stat.mtime, context });
+    return context;
   }
   api() {
     const plugin = this.app.plugins?.plugins?.journals;
@@ -790,16 +909,21 @@ var PeriodicNotes = class {
     return contextFromFrontmatter(frontmatter, config) ?? contextFromFileName(file.basename, config.weekStartsOn);
   }
   /** Full resolution, preferring the Journals index over heuristics. */
-  async contextForFile(file) {
-    const journalContext = await this.contextFromJournals(file);
-    if (journalContext) return journalContext;
-    return this.contextForFileSync(file);
+  contextForFile(file) {
+    return this.resolveCached(this.contexts, file, async () => {
+      const journalContext = await this.contextFromJournals(file);
+      if (journalContext) return journalContext;
+      return this.contextForFileSync(file);
+    });
   }
   /**
    * Strict eligibility for checkbox annotations. A note merely mentioning a
    * date, or having one in its filename, is not automatically a journal.
    */
-  async journalContextForFile(file) {
+  journalContextForFile(file) {
+    return this.resolveCached(this.journalContexts, file, () => this.resolveJournalContext(file));
+  }
+  async resolveJournalContext(file) {
     const journalContext = await this.contextFromJournals(file);
     if (journalContext) return journalContext;
     const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
@@ -809,8 +933,22 @@ var PeriodicNotes = class {
     }
     return this.dailyNoteContextForFile(file);
   }
-  /** Granularities that have a journal (or a daily note) to open. */
-  async availableGranularities() {
+  /**
+   * Granularities that have a journal (or a daily note) to open.
+   *
+   * Every render asks, and the answer changes only when the user reconfigures
+   * Journals, so it is held for a minute rather than fetched per dashboard.
+   */
+  availableGranularities() {
+    const now2 = Date.now();
+    if (this.granularities && now2 - this.granularities.at < GRANULARITY_TTL_MS) {
+      return this.granularities.value;
+    }
+    const value = this.listGranularities();
+    this.granularities = { at: now2, value };
+    return value;
+  }
+  async listGranularities() {
     const available = /* @__PURE__ */ new Set(["day"]);
     const api = this.api();
     if (!api) return available;
@@ -946,7 +1084,25 @@ var DashboardPickerModal = class extends import_obsidian2.FuzzySuggestModal {
 };
 
 // settings/dashboardSettings.ts
+var import_obsidian4 = require("obsidian");
+
+// view/tooltips.ts
 var import_obsidian3 = require("obsidian");
+var TOOLTIP_DELAY_MS = 90;
+function applyTooltip(el, text, placement = "top") {
+  el.removeAttribute("title");
+  if (typeof import_obsidian3.setTooltip === "function") {
+    (0, import_obsidian3.setTooltip)(el, text, {
+      delay: TOOLTIP_DELAY_MS,
+      placement,
+      classes: ["property-logs-tooltip"]
+    });
+    return;
+  }
+  el.setAttribute("aria-label", text);
+}
+
+// settings/dashboardSettings.ts
 function createId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -979,10 +1135,10 @@ function addPalettePicker(setting, currentValue, onChange) {
       attr: {
         type: "button",
         role: "radio",
-        title: choice.label,
         "aria-label": choice.label
       }
     });
+    applyTooltip(button, choice.label);
     button.dataset.value = choice.value;
     button.style.setProperty(
       "--property-logs-swatch-color",
@@ -1003,7 +1159,7 @@ function renderStringList(container, title, description, placeholder, values2, s
   const draw = () => {
     list.empty();
     values2.forEach((value, index) => {
-      new import_obsidian3.Setting(list).setName(value).addExtraButton((button) => button.setIcon("trash").setTooltip(`Remove ${value}`).onClick(async () => {
+      new import_obsidian4.Setting(list).setName(value).addExtraButton((button) => button.setIcon("trash").setTooltip(`Remove ${value}`).onClick(async () => {
         values2.splice(index, 1);
         await save();
         draw();
@@ -1021,7 +1177,7 @@ function renderStringList(container, title, description, placeholder, values2, s
     await save();
     draw();
   };
-  new import_obsidian3.Setting(container).addText((text) => {
+  new import_obsidian4.Setting(container).addText((text) => {
     input = text;
     text.setPlaceholder(placeholder);
     text.inputEl.addEventListener("keydown", (event2) => {
@@ -1037,7 +1193,7 @@ function renderPropertyRules(container, title, description, rules2, save) {
     list.empty();
     rules2.forEach((rule, index) => {
       const label = rule.value ? `${rule.key} = ${rule.value}` : `${rule.key} exists`;
-      new import_obsidian3.Setting(list).setName(label).addExtraButton((button) => button.setIcon("trash").setTooltip(`Remove ${label}`).onClick(async () => {
+      new import_obsidian4.Setting(list).setName(label).addExtraButton((button) => button.setIcon("trash").setTooltip(`Remove ${label}`).onClick(async () => {
         rules2.splice(index, 1);
         await save();
         draw();
@@ -1058,7 +1214,7 @@ function renderPropertyRules(container, title, description, rules2, save) {
     await save();
     draw();
   };
-  const addRuleSetting = new import_obsidian3.Setting(container).addText((text) => {
+  const addRuleSetting = new import_obsidian4.Setting(container).addText((text) => {
     keyInput = text;
     text.setPlaceholder("Property key");
   }).addText((text) => {
@@ -1076,7 +1232,7 @@ function renderColorMap(container, dashboard, save) {
     list.empty();
     Object.entries(dashboard.colorPropertyMap).forEach(([value, color]) => {
       const row = list.createDiv({ cls: "property-logs-map-row" });
-      const setting = new import_obsidian3.Setting(row).setName(value);
+      const setting = new import_obsidian4.Setting(row).setName(value);
       addPalettePicker(setting, color, async (next) => {
         dashboard.colorPropertyMap[value] = next;
         await save();
@@ -1099,7 +1255,7 @@ function renderColorMap(container, dashboard, save) {
     await save();
     draw();
   };
-  const addSetting = new import_obsidian3.Setting(container).setName("Add property color").addText((text) => {
+  const addSetting = new import_obsidian4.Setting(container).setName("Add property color").addText((text) => {
     valueInput = text;
     text.setPlaceholder("Property value");
     text.inputEl.addEventListener("keydown", (event2) => {
@@ -1131,7 +1287,7 @@ function renderValueColorMap(container, dashboard, host, save) {
     values2.forEach((value) => {
       const row = list.createDiv({ cls: "property-logs-map-row" });
       const override = dashboard.valueColors[value];
-      const setting = new import_obsidian3.Setting(row).setName(value).setDesc(override ? "Overrides the vault-wide color." : globalStyles[value]?.color ? "Using the vault-wide color." : "No color yet.");
+      const setting = new import_obsidian4.Setting(row).setName(value).setDesc(override ? "Overrides the vault-wide color." : globalStyles[value]?.color ? "Using the vault-wide color." : "No color yet.");
       addPalettePicker(setting, override ?? globalStyles[value]?.color ?? "", async (color) => {
         dashboard.valueColors[value] = color;
         await save();
@@ -1154,7 +1310,7 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
     await host.setDashboards(host.getDashboards());
     host.refreshDashboardViews();
   };
-  const heading = new import_obsidian3.Setting(container).setName("Dashboard").setDesc("A saved timeline with its own scope, tracked property, colors, and layout.").addText((text) => text.setValue(dashboard.name).onChange(async (value) => {
+  const heading = new import_obsidian4.Setting(container).setName("Dashboard").setDesc("A saved timeline with its own scope, tracked property, colors, and layout.").addText((text) => text.setValue(dashboard.name).onChange(async (value) => {
     dashboard.name = value.trim() || "Dashboard";
     await save();
   })).addButton((button) => button.setButtonText("Open").setCta().onClick(() => host.openDashboard(dashboard.id))).addExtraButton((button) => button.setIcon("copy").setTooltip("Duplicate dashboard").onClick(async () => {
@@ -1167,7 +1323,7 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
   }));
   heading.settingEl.addClass("property-logs-dashboard-heading");
   container.createEl("h3", { text: "Tracked property" });
-  new import_obsidian3.Setting(container).setName("Frontmatter property").setDesc("The live property that drives levels. Property Logs resolves its configured history key, or uses {property}Set.").addText((text) => text.setPlaceholder("relevant").setValue(dashboard.trackedPropertyKey).onChange(async (value) => {
+  new import_obsidian4.Setting(container).setName("Frontmatter property").setDesc("The live property that drives levels. Property Logs resolves its configured history key, or uses {property}Set.").addText((text) => text.setPlaceholder("relevant").setValue(dashboard.trackedPropertyKey).onChange(async (value) => {
     dashboard.trackedPropertyKey = value.trim();
     await save();
     await host.loadAllStatuses();
@@ -1176,7 +1332,7 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
   const drawMappings = () => {
     mappingList.empty();
     Object.entries(dashboard.levelMapping).forEach(([value, mappedLevel2]) => {
-      new import_obsidian3.Setting(mappingList).setName(value).addDropdown((dropdown) => {
+      new import_obsidian4.Setting(mappingList).setName(value).addDropdown((dropdown) => {
         addLevelOptions(dropdown);
         dropdown.setValue(String(mappedLevel2)).onChange(async (next) => {
           dashboard.levelMapping[value] = Number(next);
@@ -1200,7 +1356,7 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
     await save();
     drawMappings();
   };
-  new import_obsidian3.Setting(container).setName("Add value mapping").addText((text) => {
+  new import_obsidian4.Setting(container).setName("Add value mapping").addText((text) => {
     mappedValueInput = text;
     text.setPlaceholder("Property value");
     text.inputEl.addEventListener("keydown", (event2) => {
@@ -1212,14 +1368,14 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
       mappedLevel = Number(value);
     });
   }).addButton((button) => button.setButtonText("Add").onClick(addMapping));
-  new import_obsidian3.Setting(container).setName("Level when history is unset").setDesc("Creates an implicit segment from the note creation date. Level 0 hides it.").addDropdown((dropdown) => {
+  new import_obsidian4.Setting(container).setName("Level when history is unset").setDesc("Creates an implicit segment from the note creation date. Level 0 hides it.").addDropdown((dropdown) => {
     addLevelOptions(dropdown);
     dropdown.setValue(String(dashboard.defaultLevelForUnset)).onChange(async (value) => {
       dashboard.defaultLevelForUnset = Number(value);
       await save();
     });
   });
-  new import_obsidian3.Setting(container).setName("Level for unmapped values").setDesc("Used for free text and existing values that are not in the map.").addDropdown((dropdown) => {
+  new import_obsidian4.Setting(container).setName("Level for unmapped values").setDesc("Used for free text and existing values that are not in the map.").addDropdown((dropdown) => {
     addLevelOptions(dropdown);
     dropdown.setValue(String(dashboard.unmappedValueLevel)).onChange(async (value) => {
       dashboard.unmappedValueLevel = Number(value);
@@ -1239,21 +1395,21 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
       });
       [0, 1, 2, 3, 4].forEach((level2) => {
         const row = colorSection.createDiv({ cls: "property-logs-color-row" });
-        const setting = new import_obsidian3.Setting(row).setName(`Level ${level2}`);
+        const setting = new import_obsidian4.Setting(row).setName(`Level ${level2}`);
         addPalettePicker(setting, dashboard.levelColors[level2], async (value) => {
           dashboard.levelColors[level2] = value;
           await save();
         });
       });
     } else {
-      new import_obsidian3.Setting(colorSection).setName("Color property").setDesc("A current frontmatter property such as tags, area, or owner.").addText((text) => text.setPlaceholder("tags").setValue(dashboard.colorProperty).onChange(async (value) => {
+      new import_obsidian4.Setting(colorSection).setName("Color property").setDesc("A current frontmatter property such as tags, area, or owner.").addText((text) => text.setPlaceholder("tags").setValue(dashboard.colorProperty).onChange(async (value) => {
         dashboard.colorProperty = value.trim();
         await save();
       }));
       renderColorMap(colorSection, dashboard, save);
     }
   };
-  new import_obsidian3.Setting(container).setName("Color bars by").addDropdown((dropdown) => dropdown.addOption("level", "Level").addOption("property", "Property").addOption("value", "Tracked value").setValue(dashboard.colorMode).onChange(async (value) => {
+  new import_obsidian4.Setting(container).setName("Color bars by").addDropdown((dropdown) => dropdown.addOption("level", "Level").addOption("property", "Property").addOption("value", "Tracked value").setValue(dashboard.colorMode).onChange(async (value) => {
     dashboard.colorMode = value === "property" || value === "value" ? value : "level";
     await save();
     drawColors();
@@ -1277,28 +1433,28 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
   renderStringList(excluded, "Tags", "Excluded tags take priority.", "hidden", scope.excludedTags, save);
   renderPropertyRules(excluded, "Properties", "Any matching rule excludes the note.", scope.excludedProperties, save);
   container.createEl("h3", { text: "Rows and toolbar" });
-  new import_obsidian3.Setting(container).setName("Open note from timeline block").setDesc("The other gesture opens the status value picker, so both actions remain available.").addDropdown((dropdown) => dropdown.addOption("ctrl-click", "Ctrl-click opens note; click changes value").addOption("click", "Click opens note; Ctrl-click changes value").setValue(dashboard.noteOpenGesture).onChange(async (value) => {
+  new import_obsidian4.Setting(container).setName("Open note from timeline block").setDesc("The other gesture opens the status value picker, so both actions remain available.").addDropdown((dropdown) => dropdown.addOption("ctrl-click", "Ctrl-click opens note; click changes value").addOption("click", "Click opens note; Ctrl-click changes value").setValue(dashboard.noteOpenGesture).onChange(async (value) => {
     dashboard.noteOpenGesture = value === "click" ? "click" : "ctrl-click";
     await save();
   }));
-  new import_obsidian3.Setting(container).setName("Calendar axis").setDesc("Draws clickable day, week, month, quarter, and year cells with matching dividers.").addToggle((toggle) => toggle.setValue(dashboard.showPeriodAxis).onChange(async (value) => {
+  new import_obsidian4.Setting(container).setName("Calendar axis").setDesc("Draws clickable day, week, month, quarter, and year cells with matching dividers.").addToggle((toggle) => toggle.setValue(dashboard.showPeriodAxis).onChange(async (value) => {
     dashboard.showPeriodAxis = value;
     await save();
   }));
-  new import_obsidian3.Setting(container).setName("Notes from periodic notes").setDesc("Shows marked task lines such as `- [n] \u2026` from periodic notes on this timeline.").addToggle((toggle) => toggle.setValue(dashboard.showJournalNotes).onChange(async (value) => {
+  new import_obsidian4.Setting(container).setName("Notes from periodic notes").setDesc("Shows marked task lines such as `- [n] \u2026` from periodic notes on this timeline.").addToggle((toggle) => toggle.setValue(dashboard.showJournalNotes).onChange(async (value) => {
     dashboard.showJournalNotes = value;
     await save();
   }));
-  new import_obsidian3.Setting(container).setName("Properties beside note title").setDesc("Comma-separated frontmatter or history-entry keys. History keys show their latest value.").addText((text) => text.setPlaceholder("owner, tags, priority").setValue(dashboard.rowProperties.join(", ")).onChange(async (value) => {
+  new import_obsidian4.Setting(container).setName("Properties beside note title").setDesc("Comma-separated frontmatter or history-entry keys. History keys show their latest value.").addText((text) => text.setPlaceholder("owner, tags, priority").setValue(dashboard.rowProperties.join(", ")).onChange(async (value) => {
     dashboard.rowProperties = value.split(",").map((key) => key.trim()).filter(Boolean);
     await save();
   }));
-  new import_obsidian3.Setting(container).setName("Default group").setDesc("Use status, none, folder, level, or property:<key>. Status creates stacked note bars inside status rows.").addText((text) => text.setPlaceholder("status or property:area").setValue(dashboard.groupBy).onChange(async (value) => {
+  new import_obsidian4.Setting(container).setName("Default group").setDesc("Use status, none, folder, level, or property:<key>. Status creates stacked note bars inside status rows.").addText((text) => text.setPlaceholder("status or property:area").setValue(dashboard.groupBy).onChange(async (value) => {
     const trimmed = value.trim();
     dashboard.groupBy = trimmed === "status" || trimmed === "folder" || trimmed === "level" || trimmed.startsWith("property:") ? trimmed : "none";
     await save();
   }));
-  new import_obsidian3.Setting(container).setName("Default sort").setDesc("Use alphabetical, level, recent, or property:<key>.").addText((text) => text.setPlaceholder("alphabetical or property:priority").setValue(dashboard.sortBy).onChange(async (value) => {
+  new import_obsidian4.Setting(container).setName("Default sort").setDesc("Use alphabetical, level, recent, or property:<key>.").addText((text) => text.setPlaceholder("alphabetical or property:priority").setValue(dashboard.sortBy).onChange(async (value) => {
     const trimmed = value.trim();
     dashboard.sortBy = trimmed === "level" || trimmed === "recent" || trimmed.startsWith("property:") ? trimmed : "alphabetical";
     await save();
@@ -1326,7 +1482,7 @@ function renderDashboardSettingsPane(pane, host) {
       if (active) renderDashboardEditor(editor, active, host, redraw);
       else editor.empty();
     };
-    new import_obsidian3.Setting(chooser).setName("Configured dashboards").addDropdown((dropdown) => {
+    new import_obsidian4.Setting(chooser).setName("Configured dashboards").addDropdown((dropdown) => {
       dashboards.forEach((dashboard) => dropdown.addOption(dashboard.id, dashboard.name));
       if (active) dropdown.setValue(active.id);
       dropdown.onChange((id) => {
@@ -1346,7 +1502,7 @@ function renderDashboardSettingsPane(pane, host) {
 }
 
 // settings/periodicSettings.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 var WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 var PERIOD_LABELS = {
   day: "Daily note",
@@ -1360,7 +1516,7 @@ function renderPeriodicSettingsPane(pane, host) {
     text: host.hasJournalsPlugin() ? "The Journals plugin was detected, so clicking a day, week, month, quarter, or year on the timeline opens the matching journal note." : "Install the Journals plugin to open weekly, monthly, quarterly, and yearly notes from the timeline. Without it, only daily notes can be opened.",
     cls: "setting-item-description"
   });
-  new import_obsidian4.Setting(pane).setName("Week starts on").setDesc("Used for the week cells and dividers on the timeline axis.").addDropdown((dropdown) => {
+  new import_obsidian5.Setting(pane).setName("Week starts on").setDesc("Used for the week cells and dividers on the timeline axis.").addDropdown((dropdown) => {
     WEEKDAYS.forEach((day, index) => dropdown.addOption(String(index), day));
     dropdown.setValue(String(host.getWeekStartsOn())).onChange(async (value) => {
       await host.setWeekStartsOn(Number(value));
@@ -1372,7 +1528,7 @@ function renderPeriodicSettingsPane(pane, host) {
     cls: "setting-item-description"
   });
   PERIOD_GRANULARITIES.forEach((granularity) => {
-    new import_obsidian4.Setting(pane).setName(PERIOD_LABELS[granularity]).setDesc(`Days of context shown around the period (default ${DEFAULT_PERIOD_WINDOW_DAYS[granularity]}).`).addText((text) => {
+    new import_obsidian5.Setting(pane).setName(PERIOD_LABELS[granularity]).setDesc(`Days of context shown around the period (default ${DEFAULT_PERIOD_WINDOW_DAYS[granularity]}).`).addText((text) => {
       text.setPlaceholder(String(DEFAULT_PERIOD_WINDOW_DAYS[granularity])).setValue(String(host.getPeriodWindowDays()[granularity])).onChange(async (value) => {
         const days = Number(value);
         if (!Number.isFinite(days) || days < 1) return;
@@ -1402,13 +1558,13 @@ function renderPeriodicSettingsPane(pane, host) {
     }
     markers.forEach((marker, index) => {
       const row = list.createDiv({ cls: "property-logs-map-row" });
-      const setting = new import_obsidian4.Setting(row).setName(`- [${marker.marker}]`);
+      const setting = new import_obsidian5.Setting(row).setName(`- [${marker.marker}]`);
       const preview = setting.nameEl.createSpan({ cls: "property-logs-marker-preview" });
       preview.style.setProperty(
         "--property-logs-marker-color",
         paletteCssColor(marker.color) ?? marker.color
       );
-      (0, import_obsidian4.setIcon)(preview, marker.icon);
+      (0, import_obsidian5.setIcon)(preview, marker.icon);
       setting.addText((text) => {
         text.setPlaceholder("Label").setValue(marker.label).onChange(async (value) => {
           marker.label = value.trim() || marker.marker;
@@ -1420,7 +1576,7 @@ function renderPeriodicSettingsPane(pane, host) {
         text.setPlaceholder("lucide icon").setValue(marker.icon).onChange(async (value) => {
           marker.icon = value.trim() || "message-square";
           await host.setJournalMarkers(markers);
-          (0, import_obsidian4.setIcon)(preview, marker.icon);
+          (0, import_obsidian5.setIcon)(preview, marker.icon);
         });
         text.inputEl.addClass("property-logs-marker-icon-input");
       });
@@ -1457,7 +1613,7 @@ function renderPeriodicSettingsPane(pane, host) {
     iconInput.setValue("");
     draw();
   };
-  const addSetting = new import_obsidian4.Setting(pane).setName("Add marker").setDesc("The character between the brackets, plus the icon and color it shows on the timeline.").addText((text) => {
+  const addSetting = new import_obsidian5.Setting(pane).setName("Add marker").setDesc("The character between the brackets, plus the icon and color it shows on the timeline.").addText((text) => {
     markerInput = text;
     text.setPlaceholder("n");
     text.inputEl.maxLength = 1;
@@ -1476,14 +1632,14 @@ function renderPeriodicSettingsPane(pane, host) {
     color = next;
   });
   addSetting.addButton((button) => button.setButtonText("Add").setCta().onClick(add));
-  new import_obsidian4.Setting(pane).setName("Restore default markers").setDesc("Replaces the list above with n, !, ?, i, *, and b.").addButton((button) => button.setButtonText("Restore").onClick(async () => {
+  new import_obsidian5.Setting(pane).setName("Restore default markers").setDesc("Replaces the list above with n, !, ?, i, *, and b.").addButton((button) => button.setButtonText("Restore").onClick(async () => {
     await host.setJournalMarkers(DEFAULT_JOURNAL_MARKERS.map((marker) => ({ ...marker })));
     draw();
   }));
 }
 
 // settings/valueSettings.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 function addLevelOptions2(dropdown) {
   dropdown.addOption("inherit", "No default level");
   for (let level2 = 0; level2 <= 4; level2++) dropdown.addOption(String(level2), `Level ${level2}`);
@@ -1512,7 +1668,7 @@ function renderValueSettingsPane(pane, host) {
     values2.forEach((value) => {
       const style = styles[value];
       const row = list.createDiv({ cls: "property-logs-map-row" });
-      const setting = new import_obsidian5.Setting(row).setName(value);
+      const setting = new import_obsidian6.Setting(row).setName(value);
       setting.addDropdown((dropdown) => {
         addLevelOptions2(dropdown);
         dropdown.setValue(style.level === null ? "inherit" : String(style.level)).onChange(async (next) => {
@@ -1543,7 +1699,7 @@ function renderValueSettingsPane(pane, host) {
     await save();
     draw();
   };
-  const addSetting = new import_obsidian5.Setting(pane).setName("Add global value").setDesc("The value as it appears in frontmatter, such as Active or Blocked.").addText((text) => {
+  const addSetting = new import_obsidian6.Setting(pane).setName("Add global value").setDesc("The value as it appears in frontmatter, such as Active or Blocked.").addText((text) => {
     valueInput = text;
     text.setPlaceholder("Active");
     text.inputEl.addEventListener("keydown", (event2) => {
@@ -1562,7 +1718,7 @@ function renderValueSettingsPane(pane, host) {
 }
 
 // view/DashboardEmbed.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 
 // data/embedOptions.ts
 var DURATION = /^(\d+(?:\.\d+)?)\s*(d|w|m|q|y|days?|weeks?|months?|quarters?|years?)$/i;
@@ -1673,7 +1829,7 @@ function parseEmbedOptions(source) {
 }
 
 // view/DashboardTimeline.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian9 = require("obsidian");
 
 // node_modules/vis-timeline/standalone/esm/vis-timeline-graph2d.mjs
 var commonjsGlobal = typeof globalThis !== "undefined" ? globalThis : typeof window !== "undefined" ? window : typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : {};
@@ -8796,8 +8952,8 @@ function requireWeakMapBasicDetection() {
   hasRequiredWeakMapBasicDetection = 1;
   var globalThis2 = /* @__PURE__ */ requireGlobalThis();
   var isCallable2 = /* @__PURE__ */ requireIsCallable();
-  var WeakMap = globalThis2.WeakMap;
-  weakMapBasicDetection = isCallable2(WeakMap) && /native code/.test(String(WeakMap));
+  var WeakMap2 = globalThis2.WeakMap;
+  weakMapBasicDetection = isCallable2(WeakMap2) && /native code/.test(String(WeakMap2));
   return weakMapBasicDetection;
 }
 var internalState;
@@ -8815,7 +8971,7 @@ function requireInternalState() {
   var hiddenKeys2 = /* @__PURE__ */ requireHiddenKeys();
   var OBJECT_ALREADY_INITIALIZED = "Object already initialized";
   var TypeError2 = globalThis2.TypeError;
-  var WeakMap = globalThis2.WeakMap;
+  var WeakMap2 = globalThis2.WeakMap;
   var set2, get, has;
   var enforce = function(it2) {
     return has(it2) ? get(it2) : set2(it2, {});
@@ -8830,7 +8986,7 @@ function requireInternalState() {
     };
   };
   if (NATIVE_WEAK_MAP || shared2.state) {
-    var store = shared2.state || (shared2.state = new WeakMap());
+    var store = shared2.state || (shared2.state = new WeakMap2());
     store.get = store.get;
     store.has = store.has;
     store.set = store.set;
@@ -40078,11 +40234,11 @@ function reconstructHistorySegments(options) {
 }
 
 // modals/AddTopicModal.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // modals/SetValueModal.ts
-var import_obsidian6 = require("obsidian");
-var CustomValueModal = class extends import_obsidian6.Modal {
+var import_obsidian7 = require("obsidian");
+var CustomValueModal = class extends import_obsidian7.Modal {
   constructor(app, onSubmit) {
     super(app);
     this.onSubmit = onSubmit;
@@ -40090,7 +40246,7 @@ var CustomValueModal = class extends import_obsidian6.Modal {
   }
   onOpen() {
     this.titleEl.setText("Set custom value");
-    new import_obsidian6.Setting(this.contentEl).setName("Value").addText((text) => {
+    new import_obsidian7.Setting(this.contentEl).setName("Value").addText((text) => {
       text.setPlaceholder("Enter any value").onChange((value) => {
         this.value = value;
       });
@@ -40099,7 +40255,7 @@ var CustomValueModal = class extends import_obsidian6.Modal {
       });
       window.setTimeout(() => text.inputEl.focus(), 50);
     });
-    new import_obsidian6.Setting(this.contentEl).addButton((button) => button.setButtonText("Set value").setCta().onClick(() => this.submit())).addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()));
+    new import_obsidian7.Setting(this.contentEl).addButton((button) => button.setButtonText("Set value").setCta().onClick(() => this.submit())).addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()));
   }
   onClose() {
     this.contentEl.empty();
@@ -40112,11 +40268,11 @@ var CustomValueModal = class extends import_obsidian6.Modal {
       this.close();
     } catch (error) {
       console.error("Property Logs: failed to set custom value", error);
-      new import_obsidian6.Notice("Property Logs could not update this note.");
+      new import_obsidian7.Notice("Property Logs could not update this note.");
     }
   }
 };
-var SetValueModal = class extends import_obsidian6.FuzzySuggestModal {
+var SetValueModal = class extends import_obsidian7.FuzzySuggestModal {
   constructor(app, writer, file, dashboard) {
     super(app);
     this.writer = writer;
@@ -40155,7 +40311,7 @@ var SetValueModal = class extends import_obsidian6.FuzzySuggestModal {
       this.writer.refreshDashboardViews();
     } catch (error) {
       console.error("Property Logs: failed to set value", error);
-      new import_obsidian6.Notice("Property Logs could not update this note.");
+      new import_obsidian7.Notice("Property Logs could not update this note.");
       throw error;
     }
   }
@@ -40165,7 +40321,7 @@ function openValuePicker(writer, file, dashboard) {
 }
 
 // modals/AddTopicModal.ts
-var ExistingNoteModal = class extends import_obsidian7.FuzzySuggestModal {
+var ExistingNoteModal = class extends import_obsidian8.FuzzySuggestModal {
   constructor(app, host, dashboard) {
     super(app);
     this.host = host;
@@ -40180,14 +40336,14 @@ var ExistingNoteModal = class extends import_obsidian7.FuzzySuggestModal {
   }
   onChooseItem(file) {
     if (this.host.noteHasTrackedHistory(file, this.dashboard)) {
-      new import_obsidian7.Notice(`${file.basename} already has timeline history.`);
+      new import_obsidian8.Notice(`${file.basename} already has timeline history.`);
       this.host.refreshDashboardViews();
       return;
     }
     openValuePicker(this.host, file, this.dashboard);
   }
 };
-var NewNoteModal = class extends import_obsidian7.Modal {
+var NewNoteModal = class extends import_obsidian8.Modal {
   constructor(app, host, dashboard) {
     super(app);
     this.host = host;
@@ -40197,16 +40353,16 @@ var NewNoteModal = class extends import_obsidian7.Modal {
   }
   onOpen() {
     this.titleEl.setText("Create timeline note");
-    new import_obsidian7.Setting(this.contentEl).setName("Title").addText((text) => {
+    new import_obsidian8.Setting(this.contentEl).setName("Title").addText((text) => {
       text.setPlaceholder("Note title").onChange((value) => {
         this.title = value;
       });
       window.setTimeout(() => text.inputEl.focus(), 50);
     });
-    new import_obsidian7.Setting(this.contentEl).setName("Folder").setDesc("Leave blank for the vault root.").addText((text) => text.setPlaceholder("Notes").setValue(this.folder).onChange((value) => {
+    new import_obsidian8.Setting(this.contentEl).setName("Folder").setDesc("Leave blank for the vault root.").addText((text) => text.setPlaceholder("Notes").setValue(this.folder).onChange((value) => {
       this.folder = value;
     }));
-    new import_obsidian7.Setting(this.contentEl).addButton((button) => button.setButtonText("Create").setCta().onClick(() => this.create())).addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()));
+    new import_obsidian8.Setting(this.contentEl).addButton((button) => button.setButtonText("Create").setCta().onClick(() => this.create())).addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()));
   }
   onClose() {
     this.contentEl.empty();
@@ -40214,24 +40370,24 @@ var NewNoteModal = class extends import_obsidian7.Modal {
   async create() {
     const title = this.title.trim();
     if (!title || title.includes("/") || title.endsWith(".md")) {
-      new import_obsidian7.Notice("Enter a note title without slashes or the .md extension.");
+      new import_obsidian8.Notice("Enter a note title without slashes or the .md extension.");
       return;
     }
     try {
       const file = await this.host.createDashboardNote(
         title,
-        (0, import_obsidian7.normalizePath)(this.folder.trim()),
+        (0, import_obsidian8.normalizePath)(this.folder.trim()),
         this.dashboard
       );
       this.close();
       openValuePicker(this.host, file, this.dashboard);
     } catch (error) {
       console.error("Property Logs: failed to create note", error);
-      new import_obsidian7.Notice(error instanceof Error ? error.message : "Property Logs could not create the note.");
+      new import_obsidian8.Notice(error instanceof Error ? error.message : "Property Logs could not create the note.");
     }
   }
 };
-var AddTopicModal = class extends import_obsidian7.Modal {
+var AddTopicModal = class extends import_obsidian8.Modal {
   constructor(app, host, dashboard) {
     super(app);
     this.host = host;
@@ -40243,11 +40399,11 @@ var AddTopicModal = class extends import_obsidian7.Modal {
       text: `Add a note to ${this.dashboard.name}. Its scope rules still determine whether it appears.`,
       cls: "setting-item-description"
     });
-    new import_obsidian7.Setting(this.contentEl).setName("Pick existing note").setDesc("Search notes that match this dashboard's scope.").addButton((button) => button.setButtonText("Choose note").setCta().onClick(() => {
+    new import_obsidian8.Setting(this.contentEl).setName("Pick existing note").setDesc("Search notes that match this dashboard's scope.").addButton((button) => button.setButtonText("Choose note").setCta().onClick(() => {
       this.close();
       new ExistingNoteModal(this.app, this.host, this.dashboard).open();
     }));
-    new import_obsidian7.Setting(this.contentEl).setName("New note").setDesc("Create a Markdown file, then choose its initial value.").addButton((button) => button.setButtonText("Create note").onClick(() => {
+    new import_obsidian8.Setting(this.contentEl).setName("New note").setDesc("Create a Markdown file, then choose its initial value.").addButton((button) => button.setButtonText("Create note").onClick(() => {
       this.close();
       new NewNoteModal(this.app, this.host, this.dashboard).open();
     }));
@@ -40336,8 +40492,13 @@ var PeriodAxis = class {
       if (cellWidth < 6) continue;
       const cell = row.createEl(openable ? "button" : "div", {
         cls: "property-logs-axis-cell",
-        attr: openable ? { type: "button", title: `Open ${periodTitle(granularity, start)}` } : { title: periodTitle(granularity, start) }
+        attr: openable ? { type: "button" } : {}
       });
+      applyTooltip(
+        cell,
+        openable ? `Open ${periodTitle(granularity, start)}` : periodTitle(granularity, start),
+        "bottom"
+      );
       cell.style.left = `${left}px`;
       cell.style.width = `${cellWidth}px`;
       cell.toggleClass("is-today", start.getTime() === todayRange.start.getTime());
@@ -40386,6 +40547,15 @@ var PeriodAxis = class {
 };
 
 // view/DashboardTimeline.ts
+function planSignature(props) {
+  return JSON.stringify(props);
+}
+function nestedGroupSignature(groups) {
+  return groups.filter((group) => group.props.nestedGroups !== void 0).map((group) => `${group.id}:${(group.props.nestedGroups ?? []).join(",")}`).join("|");
+}
+function journalSignature(notes) {
+  return notes.map((note) => `${note.id}\0${note.marker}\0${note.text}`).join("");
+}
 var DAY_MS4 = 1e3 * 60 * 60 * 24;
 function localDate(date2) {
   const year = date2.getFullYear();
@@ -40458,8 +40628,35 @@ function addDays2(date2, days) {
   return next;
 }
 var CURRENT_TODAY_OVERFLOW_DAYS = 3;
+var SEGMENT_LINE_GAP = 4;
+var DAY_COUNT_SUBGROUP = "day-counts";
+var DAY_COUNT_TOOLTIP_LIMIT = 12;
+var MAX_COUNTED_DAYS = 4e3;
 function centerOf(range) {
   return new Date((range.start.getTime() + range.end.getTime()) / 2);
+}
+function startOfDay2(date2) {
+  const day = new Date(date2);
+  day.setHours(0, 0, 0, 0);
+  return day;
+}
+function middayOf(day) {
+  const [year, month, date2] = day.split("-").map(Number);
+  return new Date(year, month - 1, date2, 12);
+}
+function isOngoingSegment(row, segmentIndex) {
+  return segmentIndex === row.parsed.segments.length - 1 && row.parsed.currentLevel !== 0;
+}
+function segmentDays(segment, isCurrent) {
+  const days = [];
+  const cursor = startOfDay2(segment.start);
+  const last = startOfDay2(isCurrent ? segment.end : addDays2(segment.end, -1));
+  while (cursor.getTime() <= last.getTime() && days.length < MAX_COUNTED_DAYS) {
+    days.push(localDate(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  if (days.length === 0) days.push(localDate(segment.start));
+  return days;
 }
 var DashboardTimeline = class {
   constructor(app, host, containerEl, options = {}) {
@@ -40468,6 +40665,18 @@ var DashboardTimeline = class {
     this.containerEl = containerEl;
     this.options = options;
     this.timeline = null;
+    /** The collections vis-timeline draws from, updated in place between renders. */
+    this.itemsData = null;
+    this.groupsData = null;
+    /** What each id was last drawn as, so a redraw only touches what moved. */
+    this.appliedItems = /* @__PURE__ */ new Map();
+    this.appliedGroups = /* @__PURE__ */ new Map();
+    this.nestedSignature = "";
+    this.itemRows = /* @__PURE__ */ new Map();
+    this.journalNotesById = /* @__PURE__ */ new Map();
+    /** The journal notes on screen, redrawn straight away while the next read runs. */
+    this.journalNotes = [];
+    this.journalNotesKey = null;
     this.axis = null;
     this.resizeObserver = null;
     this.renderToken = 0;
@@ -40482,6 +40691,14 @@ var DashboardTimeline = class {
     this.labelFoldButtons = [];
     /** Group id → the value shown for it, for drawing into rows when folded. */
     this.groupLabelText = /* @__PURE__ */ new Map();
+    /** What the last completed render was of, so a rebuild can tell it apart. */
+    this.renderedKey = null;
+    /** The shape that render was built in; anything else needs a fresh build. */
+    this.renderedLayoutKey = null;
+    /** The window that render was showing, to be handed back to its successor. */
+    this.preservedWindow = null;
+    /** Width of each folded name at rest, measured once so redraws stay cheap. */
+    this.segmentLabelWidths = /* @__PURE__ */ new WeakMap();
   }
   setOptions(options) {
     this.options = { ...this.options, ...options };
@@ -40504,6 +40721,10 @@ var DashboardTimeline = class {
   }
   destroy() {
     this.renderToken++;
+    this.renderedKey = null;
+    this.preservedWindow = null;
+    this.journalNotes = [];
+    this.journalNotesKey = null;
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
     this.destroyTimeline();
@@ -40516,24 +40737,41 @@ var DashboardTimeline = class {
     this.axis = null;
     this.timeline?.destroy();
     this.timeline = null;
+    this.itemsData = null;
+    this.groupsData = null;
+    this.appliedItems.clear();
+    this.appliedGroups.clear();
+    this.nestedSignature = "";
+    this.itemRows.clear();
+    this.journalNotesById.clear();
+    this.renderedLayoutKey = null;
     this.timelineEl = null;
     this.dividersEl = null;
   }
   async render() {
     const token = ++this.renderToken;
+    const dashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
+    if (!dashboard) {
+      this.destroyTimeline();
+      this.containerEl.empty();
+      this.containerEl.addClass("property-logs-dashboard");
+      this.renderNoDashboard();
+      return;
+    }
+    this.dashboardId = dashboard.id;
+    if (this.canUpdateInPlace(dashboard) && this.updateInPlace(token, dashboard)) return;
+    await this.renderFull(token, dashboard);
+  }
+  /** Tears the dashboard down and builds it again, skeleton and all. */
+  async renderFull(token, dashboard) {
+    this.preserveWindow();
     this.destroyTimeline();
     this.containerEl.empty();
     this.labelFoldButtons = [];
     this.containerEl.addClass("property-logs-dashboard");
     this.containerEl.toggleClass("is-compact", this.options.compact === true);
     this.containerEl.toggleClass("is-minimal", this.options.minimal === true);
-    this.containerEl.toggleClass("is-mobile-layout", import_obsidian8.Platform.isMobile);
-    const dashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
-    if (!dashboard) {
-      this.renderNoDashboard();
-      return;
-    }
-    this.dashboardId = dashboard.id;
+    this.containerEl.toggleClass("is-mobile-layout", import_obsidian9.Platform.isMobile);
     this.containerEl.toggleClass("is-labels-collapsed", dashboard.collapsedLabels);
     const header = this.containerEl.createDiv({ cls: "property-logs-toolbar" });
     const loading = this.containerEl.createDiv({ cls: "property-logs-loading" });
@@ -40544,25 +40782,99 @@ var DashboardTimeline = class {
     if (token !== this.renderToken) return;
     const files = this.host.getDashboardFiles(dashboard);
     const rows = this.buildRows(dashboard, files);
-    const visible = this.resolveWindow();
-    if (this.options.showToolbar === false) header.remove();
-    else if (this.options.compact) this.renderCompactHeader(header, dashboard);
-    else this.renderToolbar(header, dashboard, this.collectProperties(rows, dashboard, files));
+    const visible = this.restoredWindow() ?? this.resolveWindow();
+    if (this.journalNotesKey !== this.viewKey()) this.journalNotes = [];
+    this.renderHeader(header, dashboard, files);
     loading.remove();
     if (rows.length === 0 && !dashboard.showJournalNotes) {
+      this.journalNotes = [];
       this.renderEmptyState(dashboard);
       return;
     }
     try {
-      const rendered = this.renderTimeline(rows, dashboard, visible);
-      void this.addJournalNotesAfterInitialDraw(token, dashboard, visible, rendered);
+      const model = this.buildModel(rows, dashboard);
+      this.addJournalItems(model, this.journalNotes, dashboard);
+      this.mountTimeline(model, dashboard, visible);
+      void this.syncJournalNotes(token, dashboard, visible, rows.length > 0);
     } catch (error) {
       console.error("Property Logs could not render the timeline", error);
       this.renderTimelineError(error);
     }
     void this.refreshOpenableGranularities();
   }
+  /**
+   * Feeds new data to the timeline that is already on screen. Returns false
+   * when the change is one only a rebuild can express, leaving nothing behind.
+   */
+  updateInPlace(token, dashboard) {
+    const files = this.host.getDashboardFiles(dashboard);
+    const rows = this.buildRows(dashboard, files);
+    if (rows.length === 0 && this.journalNotes.length === 0) return false;
+    const model = this.buildModel(rows, dashboard);
+    this.addJournalItems(model, this.journalNotes, dashboard);
+    if (!this.applyModel(model)) return false;
+    this.containerEl.toggleClass("is-labels-collapsed", dashboard.collapsedLabels);
+    this.refreshHeader(dashboard, files);
+    this.syncFloatingLabels();
+    this.syncSegmentLines();
+    this.updateAxis(true);
+    void this.syncJournalNotes(token, dashboard, this.currentWindow(), rows.length > 0);
+    return true;
+  }
+  /** The span on screen right now, which an update in place leaves alone. */
+  currentWindow() {
+    if (!this.timeline) return this.resolveWindow();
+    const visible = this.timeline.getWindow();
+    return { start: new Date(visible.start), end: new Date(visible.end) };
+  }
+  /** Whether the drawn timeline can take this dashboard's data as an update. */
+  canUpdateInPlace(dashboard) {
+    return this.timeline !== null && this.itemsData !== null && this.timelineEl !== null && this.containerEl.contains(this.timelineEl) && this.renderedKey === this.viewKey() && this.renderedLayoutKey === this.layoutKey(dashboard);
+  }
+  /**
+   * The shape the timeline was built in. Grouping, folding and the calendar
+   * axis decide how vis-timeline is wired together rather than what it holds,
+   * so a change to any of them starts again.
+   */
+  layoutKey(dashboard) {
+    return [
+      dashboard.groupBy,
+      String(dashboard.showPeriodAxis),
+      String(dashboard.showJournalNotes),
+      [...dashboard.foldedGroups].sort().join(","),
+      String(this.options.compact === true),
+      String(this.options.minimal === true),
+      String(this.options.showToolbar === false),
+      String(this.options.maxHeight ?? "")
+    ].join("|");
+  }
+  renderHeader(header, dashboard, files) {
+    if (this.options.showToolbar === false) header.remove();
+    else if (this.options.compact) this.renderCompactHeader(header, dashboard);
+    else this.renderToolbar(header, dashboard, this.collectProperties(dashboard, files));
+  }
+  /** Redraws the toolbar over a timeline that is staying put. */
+  refreshHeader(dashboard, files) {
+    if (this.options.showToolbar === false) return;
+    const header = this.containerEl.querySelector(
+      ":scope > .property-logs-toolbar"
+    );
+    if (!header) return;
+    this.labelFoldButtons = this.labelFoldButtons.filter((button) => !header.contains(button));
+    header.empty();
+    header.removeClass("property-logs-toolbar-compact");
+    if (this.options.compact) this.renderCompactHeader(header, dashboard);
+    else this.renderToolbar(header, dashboard, this.collectProperties(dashboard, files));
+  }
   // ─── Data ──────────────────────────────────────────────────────────────────
+  /**
+   * Parses each in-scope note's history into the row a timeline draws.
+   *
+   * A note's row depends on nothing but that note and the settings behind it,
+   * so it is kept until the note is written to or one of those settings moves
+   * — the day included, since an ongoing status runs up to today. An edit
+   * anywhere in the vault then reparses one note rather than all of them.
+   */
   buildRows(dashboard, files) {
     if (!dashboard.trackedPropertyKey.trim()) return [];
     const today = /* @__PURE__ */ new Date();
@@ -40572,48 +40884,73 @@ var DashboardTimeline = class {
     const globalStyles = this.host.getGlobalValueStyles();
     const globalLevels = globalLevelMapping(globalStyles);
     const valueColors = resolveValueColors(globalStyles, dashboard.valueColors);
+    const parseKey = JSON.stringify({
+      trackedHistoryKey,
+      dateKey,
+      historyKey,
+      day: localDate(today),
+      levelMapping: dashboard.levelMapping,
+      globalLevels,
+      defaultLevelForUnset: dashboard.defaultLevelForUnset,
+      unmappedValueLevel: dashboard.unmappedValueLevel,
+      colorMode: dashboard.colorMode,
+      levelColors: dashboard.levelColors,
+      colorProperty: dashboard.colorProperty,
+      colorPropertyMap: dashboard.colorPropertyMap,
+      valueColors
+    });
+    const cache = this.host.getDataCache();
     return files.flatMap((file) => {
-      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-      const metadata = frontmatter ?? {};
-      const history = collectCompatibleHistory(metadata, historyKey, dateKey);
-      const parsed = reconstructHistorySegments({
-        history,
-        trackedHistoryKey,
-        dateKey,
-        creationDate: file.stat.ctime,
-        today,
-        levelMapping: dashboard.levelMapping,
-        globalLevelMapping: globalLevels,
-        defaultLevelForUnset: dashboard.defaultLevelForUnset,
-        unmappedValueLevel: dashboard.unmappedValueLevel,
-        colorMode: dashboard.colorMode,
-        levelColors: dashboard.levelColors,
-        colorPropertyValue: metadata[dashboard.colorProperty],
-        colorPropertyMap: dashboard.colorPropertyMap,
-        valueColors
+      const row = cache.forFile("row", file, parseKey, () => {
+        const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+        const metadata = frontmatter ?? {};
+        const history = collectCompatibleHistory(metadata, historyKey, dateKey);
+        const parsed = reconstructHistorySegments({
+          history,
+          trackedHistoryKey,
+          dateKey,
+          creationDate: file.stat.ctime,
+          today,
+          levelMapping: dashboard.levelMapping,
+          globalLevelMapping: globalLevels,
+          defaultLevelForUnset: dashboard.defaultLevelForUnset,
+          unmappedValueLevel: dashboard.unmappedValueLevel,
+          colorMode: dashboard.colorMode,
+          levelColors: dashboard.levelColors,
+          colorPropertyValue: metadata[dashboard.colorProperty],
+          colorPropertyMap: dashboard.colorPropertyMap,
+          valueColors
+        });
+        if (parsed.segments.length === 0 && !parsed.malformed) return null;
+        return {
+          file,
+          frontmatter: metadata,
+          history,
+          parsed,
+          level: parsed.currentLevel,
+          recentChange: latestTrackedDate(history, trackedHistoryKey, dateKey)
+        };
       });
-      if (parsed.segments.length === 0 && !parsed.malformed) return [];
-      return [{
-        file,
-        frontmatter: metadata,
-        history,
-        parsed,
-        level: parsed.currentLevel,
-        recentChange: latestTrackedDate(history, trackedHistoryKey, dateKey)
-      }];
+      return row ? [row] : [];
     });
   }
-  collectProperties(rows, dashboard, files) {
+  /** Every property the toolbar's pickers offer, from one walk of the scope. */
+  collectProperties(dashboard, files) {
+    const scopeKey = JSON.stringify(dashboard.scopeFilter);
+    const inScope = this.host.getDataCache().scan(`properties:${scopeKey}`, () => {
+      const keys2 = /* @__PURE__ */ new Set();
+      files.forEach((file) => {
+        const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+        if (frontmatter) Object.keys(frontmatter).forEach((key) => keys2.add(key));
+      });
+      return Array.from(keys2);
+    });
     const properties = new Set([
       dashboard.trackedPropertyKey,
       dashboard.colorProperty,
       ...dashboard.rowProperties
     ].filter(Boolean));
-    rows.forEach((row) => Object.keys(row.frontmatter).forEach((key) => properties.add(key)));
-    files.forEach((file) => {
-      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-      if (frontmatter) Object.keys(frontmatter).forEach((key) => properties.add(key));
-    });
+    inScope.forEach((key) => properties.add(key));
     return Array.from(properties).sort(compareText);
   }
   async collectJournalNotes(dashboard, visible) {
@@ -40630,28 +40967,63 @@ var DashboardTimeline = class {
       return [];
     }
   }
-  async addJournalNotesAfterInitialDraw(token, dashboard, visible, rendered) {
+  /**
+   * Reads the marked lines of the periodic notes around the visible window and
+   * puts them on the timeline that is already drawn.
+   *
+   * The notes already on screen were drawn with the first pass, so this only
+   * has work to do when the read comes back with something different.
+   */
+  async syncJournalNotes(token, dashboard, visible, hasTrackedItems) {
     const notes = await this.collectJournalNotes(dashboard, visible);
     if (token !== this.renderToken || this.timeline === null) return;
-    if (notes.length === 0) {
-      if (rendered.items.length === 0) {
-        this.destroyTimeline();
-        this.containerEl.querySelector(".property-logs-timeline-wrapper")?.remove();
-        this.renderEmptyState(dashboard);
-      }
+    const unchanged = journalSignature(notes) === journalSignature(this.journalNotes);
+    this.journalNotes = notes;
+    this.journalNotesKey = this.viewKey();
+    if (notes.length === 0 && !hasTrackedItems) {
+      this.destroyTimeline();
+      this.containerEl.querySelector(".property-logs-timeline-wrapper")?.remove();
+      this.renderEmptyState(dashboard);
       return;
     }
-    this.addJournalItems(
-      rendered.items,
-      rendered.journalItems,
-      rendered.groups,
-      notes,
-      dashboard,
-      rendered.noteGroupIds
-    );
-    this.timeline.setData({ items: rendered.items, groups: rendered.groups });
-    this.timeline.redraw();
+    if (unchanged) return;
+    const current = this.host.getDashboard(this.dashboardId) ?? dashboard;
+    const files = this.host.getDashboardFiles(current);
+    const model = this.buildModel(this.buildRows(current, files), current);
+    this.addJournalItems(model, notes, current);
+    if (!this.applyModel(model)) {
+      this.renderedLayoutKey = null;
+      void this.render();
+      return;
+    }
+    this.syncFloatingLabels();
+    this.syncSegmentLines();
     this.updateAxis();
+  }
+  /** Identifies what is on screen: the same dashboard, focused on the same period. */
+  viewKey() {
+    const focus = this.focus ? `${this.focus.granularity}:${this.focus.range.start.getTime()}` : "";
+    return `${this.dashboardId}|${focus}`;
+  }
+  /**
+   * Remembers where the user had panned and zoomed to. A rebuild triggered by
+   * an edit elsewhere in the vault should leave the view exactly where they
+   * left it rather than snapping back to the default span.
+   */
+  preserveWindow() {
+    if (!this.timeline || this.renderedKey === null) return;
+    const visible = this.timeline.getWindow();
+    const start = new Date(visible.start);
+    const end = new Date(visible.end);
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return;
+    if (end.getTime() <= start.getTime()) return;
+    this.preservedWindow = { key: this.renderedKey, start, end };
+  }
+  /** That window again, but only for a rebuild of the very same view. */
+  restoredWindow() {
+    const preserved = this.preservedWindow;
+    if (!preserved || preserved.key !== this.viewKey()) return null;
+    return { start: preserved.start, end: preserved.end };
   }
   resolveWindow() {
     if (this.focus) {
@@ -40677,8 +41049,9 @@ var DashboardTimeline = class {
     const title = header.createEl("button", {
       cls: "property-logs-toolbar-title-button",
       text: dashboard.name,
-      attr: { type: "button", title: `Open ${dashboard.name}` }
+      attr: { type: "button" }
     });
+    applyTooltip(title, `Open ${dashboard.name}`);
     title.addEventListener("click", () => {
       if (this.options.onOpenFullDashboard) this.options.onOpenFullDashboard(dashboard.id);
       else void this.host.openDashboard(dashboard.id);
@@ -40741,12 +41114,10 @@ var DashboardTimeline = class {
     });
     const direction = toolbar.createEl("button", {
       cls: "clickable-icon property-logs-direction-button",
-      attr: {
-        "aria-label": dashboard.sortAscending ? "Sort descending" : "Sort ascending",
-        type: "button"
-      }
+      attr: { type: "button" }
     });
-    (0, import_obsidian8.setIcon)(direction, dashboard.sortAscending ? "arrow-up-narrow-wide" : "arrow-down-wide-narrow");
+    applyTooltip(direction, dashboard.sortAscending ? "Sort descending" : "Sort ascending");
+    (0, import_obsidian9.setIcon)(direction, dashboard.sortAscending ? "arrow-up-narrow-wide" : "arrow-down-wide-narrow");
     direction.addEventListener("click", async () => {
       dashboard.sortAscending = !dashboard.sortAscending;
       await this.host.save();
@@ -40768,9 +41139,10 @@ var DashboardTimeline = class {
     });
     const today = controls.createEl("button", {
       cls: "property-logs-today-button",
-      attr: { type: "button", "aria-label": "Center today", title: "Center today" }
+      attr: { type: "button" }
     });
-    (0, import_obsidian8.setIcon)(today, "calendar-days");
+    applyTooltip(today, "Center today");
+    (0, import_obsidian9.setIcon)(today, "calendar-days");
     today.createSpan({ text: "Today" });
     today.addEventListener("click", () => this.centerOnFocus());
     this.createIconButton(controls, "zoom-in", "Zoom in", () => {
@@ -40787,7 +41159,7 @@ var DashboardTimeline = class {
     });
   }
   showOverflowMenu(event2, dashboard) {
-    const menu = new import_obsidian8.Menu();
+    const menu = new import_obsidian9.Menu();
     menu.addItem((item) => item.setTitle(dashboard.foldedGroups.length > 0 ? "Unfold all rows" : "Fold all rows").setIcon(dashboard.foldedGroups.length > 0 ? "unfold-vertical" : "fold-vertical").onClick(async () => {
       dashboard.foldedGroups = dashboard.foldedGroups.length > 0 ? [] : this.allFoldableGroupIds();
       await this.host.save();
@@ -40821,36 +41193,42 @@ var DashboardTimeline = class {
   /** Folds the left label column away, giving the calendar the full width. */
   createLabelFoldButton(parent, dashboard, cls) {
     const button = this.createIconButton(parent, "panel-left-close", "Fold labels", () => {
-      dashboard.collapsedLabels = !dashboard.collapsedLabels;
-      this.applyLabelColumn(dashboard);
+      const current = this.host.getDashboard(this.dashboardId) ?? dashboard;
+      current.collapsedLabels = !current.collapsedLabels;
+      this.applyLabelColumn(current);
       void this.host.save();
     });
     if (cls) button.addClass(cls);
     this.labelFoldButtons.push(button);
-    this.applyLabelColumn(dashboard);
+    this.syncLabelColumn(dashboard);
   }
   /** Mirrors the folded state onto the container and every fold button on screen. */
-  applyLabelColumn(dashboard) {
+  syncLabelColumn(dashboard) {
     const collapsed = dashboard.collapsedLabels;
     this.containerEl.toggleClass("is-labels-collapsed", collapsed);
     const label = collapsed ? "Unfold labels" : "Fold labels";
     this.labelFoldButtons.forEach((button) => {
-      button.setAttribute("aria-label", label);
-      button.setAttribute("title", label);
-      (0, import_obsidian8.setIcon)(button, collapsed ? "panel-left-open" : "panel-left-close");
+      applyTooltip(button, label);
+      (0, import_obsidian9.setIcon)(button, collapsed ? "panel-left-open" : "panel-left-close");
     });
+  }
+  /** The same, for the gesture that actually changes the column's width. */
+  applyLabelColumn(dashboard) {
+    this.syncLabelColumn(dashboard);
     window.requestAnimationFrame(() => {
       this.timeline?.redraw();
       this.updateAxis(true);
       this.syncFloatingLabels();
+      this.syncSegmentLines();
     });
   }
   createIconButton(parent, icon, label, onClick) {
     const button = parent.createEl("button", {
       cls: "clickable-icon",
-      attr: { type: "button", "aria-label": label, title: label }
+      attr: { type: "button" }
     });
-    (0, import_obsidian8.setIcon)(button, icon);
+    applyTooltip(button, label);
+    (0, import_obsidian9.setIcon)(button, icon);
     button.addEventListener("click", (event2) => onClick(event2));
     return button;
   }
@@ -40883,28 +41261,25 @@ var DashboardTimeline = class {
     return dashboard.foldedGroups.includes(groupId);
   }
   async toggleFold(dashboard, groupId) {
+    dashboard = this.host.getDashboard(this.dashboardId) ?? dashboard;
     dashboard.foldedGroups = this.isFolded(dashboard, groupId) ? dashboard.foldedGroups.filter((id) => id !== groupId) : [...dashboard.foldedGroups, groupId];
     await this.host.save();
     this.refresh();
   }
-  renderTimeline(rows, dashboard, visible) {
-    const wrapper = this.containerEl.createDiv({ cls: "property-logs-timeline-wrapper" });
-    if (this.options.showToolbar === false) {
-      this.createLabelFoldButton(wrapper, dashboard, "property-logs-labels-corner-toggle");
-    }
-    const axisEl = wrapper.createDiv({ cls: "property-logs-axis" });
-    const timelineEl = wrapper.createDiv({ cls: "property-logs-timeline" });
-    const dividersEl = wrapper.createDiv({ cls: "property-logs-axis-dividers" });
-    this.timelineEl = timelineEl;
-    this.dividersEl = dividersEl;
-    axisEl.toggle(dashboard.showPeriodAxis);
-    dividersEl.toggle(dashboard.showPeriodAxis);
-    const items = [];
-    const groups = [];
-    const itemRows = /* @__PURE__ */ new Map();
-    this.groupLabelText.clear();
-    const journalItems = /* @__PURE__ */ new Map();
-    const noteGroupIds = /* @__PURE__ */ new Map();
+  /**
+   * Describes the whole dashboard without building any of it: which groups
+   * exist, which blocks sit in them, and what each is drawn from. Nothing here
+   * touches the DOM, so the result can be compared against what is on screen.
+   */
+  buildModel(rows, dashboard) {
+    const model = {
+      items: [],
+      groups: [],
+      itemRows: /* @__PURE__ */ new Map(),
+      journalNotes: /* @__PURE__ */ new Map(),
+      noteGroupIds: /* @__PURE__ */ new Map(),
+      groupLabelText: /* @__PURE__ */ new Map()
+    };
     const sortedRows = [...rows].sort((first, second) => compareRows(first, second, dashboard));
     if (dashboard.groupBy === "status") {
       const statusBuckets = /* @__PURE__ */ new Map();
@@ -40926,20 +41301,33 @@ var DashboardTimeline = class {
         const groupId = `status:${status}`;
         const foldable = bucket.notes.size > 1;
         const folded = foldable && this.isFolded(dashboard, groupId);
-        this.groupLabelText.set(groupId, status);
-        groups.push({
+        const noteCount = bucket.notes.size;
+        model.groupLabelText.set(groupId, status);
+        model.groups.push({
           id: groupId,
-          content: this.createGroupLabel(
+          props: {
+            id: groupId,
+            className: folded ? "property-logs-status-group is-folded" : "property-logs-status-group",
+            order
+          },
+          contentKey: `status|${status}|${noteCount}|${foldable}|${folded}`,
+          createContent: () => this.createGroupLabel(
             dashboard,
             groupId,
-            this.createStatusLabel(status, bucket.notes.size),
+            this.createStatusLabel(status, noteCount),
             foldable
-          ),
-          className: folded ? "property-logs-status-group is-folded" : "property-logs-status-group",
-          order
+          )
         });
+        if (folded) {
+          const tallies = /* @__PURE__ */ new Map();
+          bucket.segments.forEach(({ row, segment, segmentIndex }) => {
+            this.tallySegment(tallies, row, segment, segmentIndex);
+          });
+          this.planDayCounts(model, groupId, tallies);
+          return;
+        }
         bucket.segments.forEach(({ row, segment, segmentIndex }) => {
-          this.addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId, folded);
+          this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId);
         });
       });
     } else {
@@ -40960,86 +41348,107 @@ var DashboardTimeline = class {
         const foldable = dashboard.groupBy !== "none" && bucketRows.length > 1;
         const folded = foldable && this.isFolded(dashboard, parentId);
         if (dashboard.groupBy !== "none") {
-          this.groupLabelText.set(parentId, bucket || "All notes");
-          const label = this.createGroupLabel(
-            dashboard,
-            parentId,
-            this.createBucketLabel(bucket, bucketRows.length),
-            foldable
-          );
-          groups.push({
+          const count = bucketRows.length;
+          model.groupLabelText.set(parentId, bucket || "All notes");
+          model.groups.push({
             id: parentId,
-            content: label,
-            nestedGroups: folded ? void 0 : bucketRows.map((row) => `note:${row.file.path}`),
-            showNested: folded ? void 0 : true,
-            className: folded ? "property-logs-group-header is-folded" : "property-logs-group-header",
-            order: order++
+            props: {
+              id: parentId,
+              nestedGroups: folded ? void 0 : bucketRows.map((row) => `note:${row.file.path}`),
+              showNested: folded ? void 0 : true,
+              className: folded ? "property-logs-group-header is-folded" : "property-logs-group-header",
+              order: order++
+            },
+            contentKey: `bucket|${bucket}|${count}|${foldable}|${folded}`,
+            createContent: () => this.createGroupLabel(
+              dashboard,
+              parentId,
+              this.createBucketLabel(bucket, count),
+              foldable
+            )
           });
         }
         if (folded) {
+          const tallies = /* @__PURE__ */ new Map();
           bucketRows.forEach((row) => {
-            noteGroupIds.set(row.file.path, parentId);
+            model.noteGroupIds.set(row.file.path, parentId);
             row.parsed.segments.forEach((segment, segmentIndex) => {
-              this.addSegmentItem(
-                items,
-                itemRows,
-                row,
-                dashboard,
-                segment,
-                segmentIndex,
-                parentId,
-                true
-              );
+              this.tallySegment(tallies, row, segment, segmentIndex);
             });
           });
+          this.planDayCounts(model, parentId, tallies);
           return;
         }
         bucketRows.forEach((row) => {
           const groupId = `note:${row.file.path}`;
-          noteGroupIds.set(row.file.path, groupId);
-          this.groupLabelText.set(groupId, row.file.basename);
-          groups.push({
+          model.noteGroupIds.set(row.file.path, groupId);
+          model.groupLabelText.set(groupId, row.file.basename);
+          model.groups.push({
             id: groupId,
-            content: this.createRowLabel(row, dashboard),
-            className: row.parsed.malformed ? "property-logs-row-malformed" : "property-logs-row",
-            order: order++
+            props: {
+              id: groupId,
+              className: row.parsed.malformed ? "property-logs-row-malformed" : "property-logs-row",
+              order: order++
+            },
+            contentKey: this.rowLabelKey(row, dashboard),
+            createContent: () => this.createRowLabel(row, dashboard)
           });
           row.parsed.segments.forEach((segment, segmentIndex) => {
-            this.addSegmentItem(
-              items,
-              itemRows,
-              row,
-              dashboard,
-              segment,
-              segmentIndex,
-              groupId,
-              false
-            );
+            this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId);
           });
         });
       });
     }
+    return model;
+  }
+  /** Builds the vis-timeline instance the model will be fed into from now on. */
+  mountTimeline(model, dashboard, visible) {
+    const wrapper = this.containerEl.createDiv({ cls: "property-logs-timeline-wrapper" });
+    if (this.options.showToolbar === false) {
+      this.createLabelFoldButton(wrapper, dashboard, "property-logs-labels-corner-toggle");
+    }
+    const axisEl = wrapper.createDiv({ cls: "property-logs-axis" });
+    const timelineEl = wrapper.createDiv({ cls: "property-logs-timeline" });
+    const dividersEl = wrapper.createDiv({ cls: "property-logs-axis-dividers" });
+    this.timelineEl = timelineEl;
+    this.dividersEl = dividersEl;
+    axisEl.toggle(dashboard.showPeriodAxis);
+    dividersEl.toggle(dashboard.showPeriodAxis);
+    this.itemsData = new DataSet();
+    this.groupsData = new DataSet();
+    this.appliedItems.clear();
+    this.appliedGroups.clear();
+    this.nestedSignature = "";
+    this.applyModel(model);
     const options = this.timelineOptions(visible, dashboard.showPeriodAxis);
-    this.timeline = new Timeline(timelineEl, items, groups, options);
+    this.timeline = new Timeline(
+      timelineEl,
+      this.itemsData,
+      this.groupsData,
+      options
+    );
     this.timeline.on("click", (properties) => {
       if (properties.item === null || properties.item === void 0) return;
       const id = String(properties.item);
-      const journalNote = journalItems.get(id);
+      const journalNote = this.journalNotesById.get(id);
       if (journalNote) {
         this.activateJournalNote(journalNote, properties.event);
         return;
       }
-      const row = itemRows.get(id);
+      const row = this.itemRows.get(id);
       if (row) this.activateTimelineBlock(row, dashboard, properties.event);
     });
     this.timeline.on("contextmenu", (properties) => {
       if (!this.isCtrlGesture(properties.event)) return;
       properties.event.preventDefault();
       if (properties.item === null || properties.item === void 0) return;
-      const row = itemRows.get(String(properties.item));
+      const row = this.itemRows.get(String(properties.item));
       if (row) this.activateTimelineBlock(row, dashboard, properties.event);
     });
-    this.timeline.on("changed", () => this.syncFloatingLabels());
+    this.timeline.on("changed", () => {
+      this.syncFloatingLabels();
+      this.syncSegmentLines();
+    });
     if (dashboard.showPeriodAxis) {
       this.axis = new PeriodAxis(axisEl, dividersEl, {
         weekStartsOn: this.host.getWeekStartsOn(),
@@ -41061,14 +41470,77 @@ var DashboardTimeline = class {
       this.timeline.setWindow(visible.start, visible.end, { animation: false });
       this.updateAxis();
       this.syncFloatingLabels();
+      this.syncSegmentLines();
+      wrapper.addClass("is-ready");
     });
     this.observeResize(wrapper, initialTimeline);
-    return { items, groups, journalItems, noteGroupIds };
+    this.renderedKey = this.viewKey();
+    this.renderedLayoutKey = this.layoutKey(dashboard);
+  }
+  /**
+   * Hands the model to vis-timeline as the difference from what it already
+   * holds: rows and blocks that did not change keep the elements they have,
+   * and the timeline keeps its scroll, its zoom and its selection.
+   *
+   * Returns false — having changed nothing — when the model re-links groups to
+   * one another, which only a rebuild can carry out.
+   */
+  applyModel(model) {
+    const itemsData = this.itemsData;
+    const groupsData = this.groupsData;
+    if (!itemsData || !groupsData) return false;
+    const nested = nestedGroupSignature(model.groups);
+    if (this.appliedGroups.size > 0 && nested !== this.nestedSignature) return false;
+    const groupAdds = [];
+    const groupUpdates = [];
+    const nextGroups = /* @__PURE__ */ new Map();
+    model.groups.forEach((group) => {
+      const propsKey = planSignature(group.props);
+      const applied = this.appliedGroups.get(group.id);
+      if (!applied) {
+        groupAdds.push({ ...group.props, content: group.createContent() });
+      } else if (applied.contentKey !== group.contentKey) {
+        groupUpdates.push({ ...group.props, content: group.createContent() });
+      } else if (applied.propsKey !== propsKey) {
+        groupUpdates.push({ ...group.props });
+      }
+      nextGroups.set(group.id, { contentKey: group.contentKey, propsKey });
+    });
+    const itemAdds = [];
+    const itemUpdates = [];
+    const nextItems = /* @__PURE__ */ new Map();
+    model.items.forEach((item) => {
+      const propsKey = planSignature(item.props);
+      const applied = this.appliedItems.get(item.id);
+      if (!applied) {
+        itemAdds.push({ ...item.props, content: item.createContent() });
+      } else if (applied.contentKey !== item.contentKey) {
+        itemUpdates.push({ ...item.props, content: item.createContent() });
+      } else if (applied.propsKey !== propsKey) {
+        itemUpdates.push({ ...item.props });
+      }
+      nextItems.set(item.id, { contentKey: item.contentKey, propsKey });
+    });
+    const removedItems = Array.from(this.appliedItems.keys()).filter((id) => !nextItems.has(id));
+    const removedGroups = Array.from(this.appliedGroups.keys()).filter((id) => !nextGroups.has(id));
+    if (removedItems.length > 0) itemsData.remove(removedItems);
+    if (removedGroups.length > 0) groupsData.remove(removedGroups);
+    if (groupAdds.length > 0) groupsData.add(groupAdds);
+    if (groupUpdates.length > 0) groupsData.update(groupUpdates);
+    if (itemAdds.length > 0) itemsData.add(itemAdds);
+    if (itemUpdates.length > 0) itemsData.update(itemUpdates);
+    this.appliedGroups = nextGroups;
+    this.appliedItems = nextItems;
+    this.nestedSignature = nested;
+    this.itemRows = model.itemRows;
+    this.journalNotesById = model.journalNotes;
+    this.groupLabelText = model.groupLabelText;
+    return true;
   }
   timelineOptions(visible, showAxis) {
     const compact = this.options.compact === true;
     const minimal = this.options.minimal === true;
-    const interactive = !(compact && import_obsidian8.Platform.isMobile);
+    const interactive = !(compact && import_obsidian9.Platform.isMobile);
     const options = {
       autoResize: true,
       width: "100%",
@@ -41087,15 +41559,17 @@ var DashboardTimeline = class {
       // month cells can open the matching periodic note.
       showMinorLabels: !showAxis,
       showMajorLabels: !showAxis,
-      horizontalScroll: !compact && !import_obsidian8.Platform.isMobile,
+      horizontalScroll: !compact && !import_obsidian9.Platform.isMobile,
       verticalScroll: true,
       moveable: interactive,
-      zoomable: import_obsidian8.Platform.isMobile && interactive,
+      zoomable: import_obsidian9.Platform.isMobile && interactive,
       zoomMin: 1e3 * 60 * 60 * 24 * 7,
       zoomMax: 1e3 * 60 * 60 * 24 * 365 * 20,
+      // Rows sit tight under the axis and stacked lines sit tight on each
+      // other: the folded rows are read as a list, and a list has no gaps.
       margin: {
-        item: { horizontal: 0, vertical: minimal ? 1 : compact ? 1 : 2 },
-        axis: minimal ? 2 : compact ? 3 : 5
+        item: { horizontal: 0, vertical: 1 },
+        axis: minimal ? 1 : 2
       },
       groupOrder: (first, second) => (first.order ?? 0) - (second.order ?? 0),
       start: visible.start,
@@ -41137,6 +41611,46 @@ var DashboardTimeline = class {
       if (label.textContent !== text) label.setText(text);
     });
   }
+  /**
+   * Lays the line and arrow of every note out around its name.
+   *
+   * The name sits inside vis-timeline's content element, which vis slides
+   * sideways to keep it on screen when the range starts off the left edge, so
+   * the line has to begin wherever the name currently ends and reach the
+   * range's own end — or, for a name longer than its range, sit flush behind
+   * it with the arrow directly after the text. Both edges are pushed onto the
+   * item as custom properties, where the CSS draws from them.
+   */
+  syncSegmentLines() {
+    if (!this.timelineEl) return;
+    const items = this.timelineEl.querySelectorAll(
+      ".vis-foreground .vis-item.property-logs-segment"
+    );
+    if (items.length === 0) return;
+    const measured = [];
+    items.forEach((item) => {
+      const content = item.querySelector(":scope > .vis-item-overflow > .vis-item-content");
+      const label = content?.querySelector(".property-logs-segment-button");
+      if (!content || !label) return;
+      const width = parseFloat(item.style.width) || 0;
+      const shift = /translateX\((-?[\d.]+)px\)/.exec(content.style.transform);
+      const offset = shift ? parseFloat(shift[1]) : 0;
+      let labelWidth = this.segmentLabelWidths.get(label);
+      if (labelWidth === void 0) {
+        labelWidth = label.offsetWidth;
+        if (labelWidth > 0) this.segmentLabelWidths.set(label, labelWidth);
+      }
+      const start = offset + labelWidth + SEGMENT_LINE_GAP;
+      measured.push({ item, start, end: Math.max(width, start) });
+    });
+    measured.forEach(({ item, start, end }) => {
+      const key = `${Math.round(start)}:${Math.round(end)}`;
+      if (item.dataset.segmentLine === key) return;
+      item.dataset.segmentLine = key;
+      item.style.setProperty("--property-logs-line-start", `${start}px`);
+      item.style.setProperty("--property-logs-line-end", `${end}px`);
+    });
+  }
   updateAxis(immediate = false) {
     if (!this.timeline || !this.axis || !this.timelineEl) return;
     const leftPanel = this.timelineEl.querySelector(".vis-panel.vis-left");
@@ -41151,67 +41665,201 @@ var DashboardTimeline = class {
       immediate
     );
   }
-  addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId, folded) {
+  /**
+   * Adds one note's segment to a folded row's day counts, once per day it
+   * covers. A note that holds a value across a week is one note on each of
+   * those days, not seven.
+   */
+  tallySegment(tallies, row, segment, segmentIndex) {
+    const label = segment.value ? `${row.file.basename} \u2014 ${segment.value}` : row.file.basename;
+    segmentDays(segment, isOngoingSegment(row, segmentIndex)).forEach((day) => {
+      this.tallyDay(tallies, day, row.file.path, label);
+    });
+  }
+  tallyDay(tallies, day, key, label) {
+    const tally = tallies.get(day) ?? { notes: [], counted: /* @__PURE__ */ new Set() };
+    if (!tally.counted.has(key)) {
+      tally.counted.add(key);
+      tally.notes.push(label);
+    }
+    tallies.set(day, tally);
+  }
+  /**
+   * Draws a folded row as a single line of days: one number per day saying how
+   * many notes sit there, and a hint naming them. The notes themselves are
+   * left out — collapsing the row to one line is what folding it now means.
+   *
+   * Every count shares one subgroup, which is what holds them to that line:
+   * vis-timeline stacks items within a group, but leaves a subgroup flat
+   * unless it is asked to stack, so days that crowd together at a wide zoom
+   * overlap instead of growing the row.
+   */
+  planDayCounts(model, groupId, tallies) {
+    tallies.forEach((tally, day) => {
+      const id = `${groupId}\0count:${day}`;
+      model.items.push({
+        id,
+        props: {
+          id,
+          group: groupId,
+          subgroup: DAY_COUNT_SUBGROUP,
+          start: middayOf(day),
+          type: "point",
+          selectable: false,
+          editable: false,
+          className: "property-logs-day-count"
+        },
+        contentKey: `count|${day}|${tally.notes.join("")}`,
+        createContent: () => this.createDayCountContent(day, tally.notes)
+      });
+    });
+  }
+  /** The number itself, with the day's notes behind it on hover. */
+  createDayCountContent(day, notes) {
+    const badge = document.createElement("div");
+    badge.className = "property-logs-day-count-badge";
+    badge.setText(String(notes.length));
+    const named = notes.slice(0, DAY_COUNT_TOOLTIP_LIMIT);
+    const remaining = notes.length - named.length;
+    if (remaining > 0) named.push(`\u2026and ${remaining} more`);
+    applyTooltip(badge, [
+      `${day} \xB7 ${notes.length} ${notes.length === 1 ? "note" : "notes"}`,
+      ...named
+    ].join("\n"));
+    return badge;
+  }
+  planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId) {
     const id = `${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`;
-    const isCurrent = segmentIndex === row.parsed.segments.length - 1;
+    const isCurrent = isOngoingSegment(row, segmentIndex);
     const startedToday = localDate(segment.start) === localDate(/* @__PURE__ */ new Date());
     const end = segment.end.getTime() > segment.start.getTime() ? segment.end : addDays2(segment.start, isCurrent && startedToday ? CURRENT_TODAY_OVERFLOW_DAYS : 1);
-    const item = {
+    const className = `property-logs-segment${isCurrent ? " is-ongoing" : ""}`;
+    model.items.push({
       id,
-      group: groupId,
-      start: segment.start,
-      end,
-      type: "range",
-      align: "auto",
-      content: this.createSegmentContent(row, dashboard, segment, folded),
-      selectable: false,
-      editable: false,
-      className: folded ? "property-logs-segment is-folded" : "property-logs-segment",
-      style: timelineColorStyle(segment.color)
-    };
-    if (folded) item.subgroup = `${groupId}:folded`;
-    items.push(item);
-    itemRows.set(id, row);
+      props: {
+        id,
+        group: groupId,
+        start: segment.start,
+        end,
+        type: "range",
+        align: "auto",
+        selectable: false,
+        editable: false,
+        className,
+        style: timelineColorStyle(segment.color)
+      },
+      // The block's own text comes from the note, its properties and the dates
+      // of this segment; the note's mtime stands in for the first two.
+      contentKey: [
+        row.file.stat.mtime,
+        row.file.basename,
+        segment.value ?? "",
+        localDate(segment.start),
+        localDate(segment.end),
+        dashboard.rowProperties.join(","),
+        dashboard.noteOpenGesture
+      ].join("|"),
+      createContent: () => this.createSegmentContent(row, dashboard, segment)
+    });
+    model.itemRows.set(id, row);
   }
-  addJournalItems(items, journalItems, groups, notes, dashboard, noteGroupIds) {
+  /** What a note's row label is drawn from, for spotting the ones that moved. */
+  rowLabelKey(row, dashboard) {
+    return [
+      "note",
+      row.file.stat.mtime,
+      row.file.basename,
+      dashboard.rowProperties.join(","),
+      row.parsed.issues.length
+    ].join("|");
+  }
+  addJournalItems(model, notes, dashboard) {
     if (notes.length === 0) return;
     const markers = this.host.getJournalMarkers();
     const laneId = "journal:lane";
-    let laneUsed = false;
+    const laneFolded = this.isFolded(dashboard, laneId);
+    const laneTallies = /* @__PURE__ */ new Map();
+    let laneCount = 0;
     notes.forEach((note) => {
       const style = markerStyle(markers, note.marker);
-      const targetGroup = this.resolveJournalGroup(note, noteGroupIds);
-      const groupId = targetGroup ?? laneId;
-      if (!targetGroup) laneUsed = true;
-      const folded = this.isFolded(dashboard, groupId);
-      const item = {
+      const targetGroup = this.resolveJournalGroup(note, model.noteGroupIds);
+      const groupId = targetGroup && !this.isFolded(dashboard, targetGroup) ? targetGroup : laneId;
+      if (groupId === laneId) {
+        laneCount++;
+        if (laneFolded) {
+          this.tallyDay(
+            laneTallies,
+            localDate(centerOf(note.range)),
+            note.id,
+            plainNoteText(note.text)
+          );
+          return;
+        }
+      }
+      model.items.push({
         id: note.id,
-        group: groupId,
-        start: centerOf(note.range),
-        type: "point",
-        content: this.createJournalContent(note, style),
-        selectable: false,
-        editable: false,
-        className: "property-logs-journal-note",
-        style: timelineColorStyle(style.color)
-      };
-      if (folded) item.subgroup = `${groupId}:folded`;
-      items.push(item);
-      journalItems.set(note.id, note);
+        props: {
+          id: note.id,
+          group: groupId,
+          start: centerOf(note.range),
+          type: "point",
+          selectable: false,
+          editable: false,
+          className: "property-logs-journal-note",
+          style: timelineColorStyle(style.color)
+        },
+        contentKey: [
+          "journal",
+          note.marker,
+          note.text,
+          note.file.basename,
+          localDate(note.range.start),
+          style.icon,
+          style.label
+        ].join("|"),
+        createContent: () => this.createJournalContent(note, style)
+      });
+      model.journalNotes.set(note.id, note);
     });
-    if (laneUsed) {
-      const label = document.createElement("div");
-      label.className = "property-logs-journal-lane-label";
-      const icon = label.createSpan({ cls: "property-logs-journal-lane-icon" });
-      (0, import_obsidian8.setIcon)(icon, "sticky-note");
-      label.createSpan({ text: "Journal notes" });
-      groups.unshift({
+    if (laneCount > 0) {
+      this.planDayCounts(model, laneId, laneTallies);
+      model.groupLabelText.set(laneId, `Journal notes \xB7 ${laneCount}`);
+      model.groups.unshift({
         id: laneId,
-        content: label,
-        className: "property-logs-journal-lane",
-        order: -1
+        props: {
+          id: laneId,
+          className: laneFolded ? "property-logs-journal-lane is-folded" : "property-logs-journal-lane",
+          order: -1
+        },
+        contentKey: `journal-lane|${laneCount}|${laneFolded}`,
+        createContent: () => this.createGroupLabel(
+          dashboard,
+          laneId,
+          this.createJournalLaneLabel(laneCount, laneFolded),
+          true
+        )
       });
     }
+  }
+  /**
+   * The lane's own label: a marker icon and its name. Unfolded it also carries
+   * how many notes it holds; folded, that number has moved out into the
+   * calendar, where it is broken down by day.
+   */
+  createJournalLaneLabel(count, folded) {
+    const label = document.createElement("div");
+    label.className = folded ? "property-logs-journal-lane-label is-folded" : "property-logs-journal-lane-label";
+    const icon = label.createSpan({ cls: "property-logs-journal-lane-icon" });
+    (0, import_obsidian9.setIcon)(icon, "sticky-note");
+    label.createSpan({ text: "Journal notes", cls: "property-logs-journal-lane-name" });
+    if (!folded) label.createSpan({ text: String(count), cls: "property-logs-status-count" });
+    const plural = count === 1 ? "note" : "notes";
+    applyTooltip(
+      label,
+      folded ? `${count} journal ${plural}, counted by day \u2014 unfold to read them` : `${count} journal ${plural}`,
+      "right"
+    );
+    return label;
   }
   resolveJournalGroup(note, noteGroupIds) {
     for (const link of note.links) {
@@ -41228,11 +41876,14 @@ var DashboardTimeline = class {
     content.className = "property-logs-journal-button";
     content.setAttribute("data-task", note.marker);
     const text = plainNoteText(note.text);
-    content.title = `${style.label} \xB7 ${localDate(note.range.start)}
-${text}`;
-    content.setAttribute("aria-label", `${style.label}: ${text}`);
+    applyTooltip(
+      content,
+      `${style.label} \xB7 ${localDate(note.range.start)}
+${text}
+${note.file.basename}`
+    );
     const icon = content.createSpan({ cls: "property-logs-journal-icon" });
-    (0, import_obsidian8.setIcon)(icon, style.icon);
+    (0, import_obsidian9.setIcon)(icon, style.icon);
     content.createSpan({ text, cls: "property-logs-journal-text" });
     content.addEventListener("click", (event2) => {
       event2.stopPropagation();
@@ -41245,9 +41896,9 @@ ${text}`;
     const key = `journal:${note.id}`;
     if (this.lastBlockActivation?.key === key && now2 - this.lastBlockActivation.at < 250) return;
     this.lastBlockActivation = { key, at: now2 };
-    if (import_obsidian8.Platform.isMobile || this.isCtrlGesture(event2)) {
+    if (import_obsidian9.Platform.isMobile || this.isCtrlGesture(event2)) {
       const source = event2.srcEvent ?? event2;
-      const menu = new import_obsidian8.Menu();
+      const menu = new import_obsidian9.Menu();
       menu.addItem((item) => item.setTitle(plainNoteText(note.text)).setIcon("quote").setDisabled(true));
       menu.addItem((item) => item.setTitle(`Open ${note.file.basename}`).setIcon("file-text").onClick(() => void this.openJournalSource(note)));
       if (typeof source.clientX === "number") menu.showAtMouseEvent(source);
@@ -41264,18 +41915,17 @@ ${text}`;
     const label = document.createElement("div");
     label.className = "property-logs-status-label";
     label.createSpan({ text: status, cls: "property-logs-status-name" });
-    label.createSpan({
-      text: String(noteCount),
-      cls: "property-logs-status-count",
-      attr: { "aria-label": `${noteCount} ${noteCount === 1 ? "note" : "notes"}` }
-    });
+    label.createSpan({ text: String(noteCount), cls: "property-logs-status-count" });
+    applyTooltip(label, `${status} \xB7 ${noteCount} ${noteCount === 1 ? "note" : "notes"}`, "right");
     return label;
   }
   createBucketLabel(bucket, noteCount) {
     const label = document.createElement("div");
     label.className = "property-logs-status-label";
-    label.createSpan({ text: bucket || "All notes", cls: "property-logs-status-name" });
+    const name = bucket || "All notes";
+    label.createSpan({ text: name, cls: "property-logs-status-name" });
     label.createSpan({ text: String(noteCount), cls: "property-logs-status-count" });
+    applyTooltip(label, `${name} \xB7 ${noteCount} ${noteCount === 1 ? "note" : "notes"}`, "right");
     return label;
   }
   /** Wraps a group label with the fold toggle that collapses it into one row. */
@@ -41292,14 +41942,10 @@ ${text}`;
     wrapper.dataset.foldableGroup = groupId;
     const toggle = wrapper.createEl("button", {
       cls: "property-logs-fold-toggle",
-      attr: {
-        type: "button",
-        "aria-expanded": String(!folded),
-        "aria-label": folded ? "Unfold rows" : "Fold rows",
-        title: folded ? "Unfold rows" : "Fold into one row"
-      }
+      attr: { type: "button", "aria-expanded": String(!folded) }
     });
-    (0, import_obsidian8.setIcon)(toggle, folded ? "chevron-right" : "chevron-down");
+    applyTooltip(toggle, folded ? "Unfold rows" : "Fold into one row");
+    (0, import_obsidian9.setIcon)(toggle, folded ? "chevron-right" : "chevron-down");
     toggle.addEventListener("click", (event2) => {
       event2.preventDefault();
       event2.stopPropagation();
@@ -41308,25 +41954,27 @@ ${text}`;
     wrapper.appendChild(content);
     return wrapper;
   }
-  createSegmentContent(row, dashboard, segment, folded) {
+  createSegmentContent(row, dashboard, segment) {
     const content = document.createElement("button");
     content.type = "button";
-    content.className = folded ? "property-logs-segment-button is-folded" : "property-logs-segment-button";
+    content.className = "property-logs-segment-button";
     const primaryAction = dashboard.noteOpenGesture === "click" ? "Click to open note; Ctrl-click to change value." : "Click to change value; Ctrl-click to open note.";
-    content.title = `${row.file.basename} \u2014 ${segment.value ?? "Unset"} \u2014 ${localDate(segment.start)} to ${localDate(segment.end)}. ${primaryAction}`;
-    content.setAttribute(
-      "aria-label",
-      `${row.file.basename}: ${segment.value ?? "unset"}, level ${segment.level}. ${primaryAction}`
-    );
     content.createSpan({ text: row.file.basename, cls: "property-logs-segment-title" });
-    if (!folded) {
-      dashboard.rowProperties.forEach((key) => {
-        const value = displayPropertyValue(
-          Object.prototype.hasOwnProperty.call(row.frontmatter, key) ? row.frontmatter[key] : latestHistoryValue(row.history, key, this.host.getDashboardDateKey())
-        );
-        if (value) content.createSpan({ text: value, cls: "property-logs-segment-meta" });
-      });
-    }
+    const meta = [];
+    dashboard.rowProperties.forEach((key) => {
+      const value = displayPropertyValue(
+        Object.prototype.hasOwnProperty.call(row.frontmatter, key) ? row.frontmatter[key] : latestHistoryValue(row.history, key, this.host.getDashboardDateKey())
+      );
+      if (!value) return;
+      meta.push(`${key}: ${value}`);
+      content.createSpan({ text: value, cls: "property-logs-segment-meta" });
+    });
+    applyTooltip(content, [
+      row.file.basename,
+      `${segment.value ?? "Unset"} \xB7 ${localDate(segment.start)} \u2192 ${localDate(segment.end)}`,
+      ...meta,
+      primaryAction
+    ].join("\n"));
     content.addEventListener("click", (event2) => {
       event2.stopPropagation();
       this.activateTimelineBlock(row, dashboard, event2);
@@ -41345,6 +41993,7 @@ ${text}`;
     return Boolean(direct.ctrlKey || source?.ctrlKey);
   }
   activateTimelineBlock(row, dashboard, event2) {
+    dashboard = this.host.getDashboard(this.dashboardId) ?? dashboard;
     const gesture = this.isCtrlGesture(event2) ? "ctrl-click" : "click";
     const opensNote = dashboard.noteOpenGesture === gesture;
     const activationKey = `${row.file.path}:${opensNote ? "open" : "edit"}`;
@@ -41365,6 +42014,8 @@ ${text}`;
       cls: "property-logs-row-title",
       attr: { type: "button" }
     });
+    applyTooltip(title, `${row.file.basename}
+Click to open the note.`, "right");
     title.addEventListener("click", () => void this.app.workspace.getLeaf(false).openFile(row.file));
     const metadata = label.createDiv({ cls: "property-logs-row-metadata" });
     dashboard.rowProperties.forEach((key) => {
@@ -41376,9 +42027,8 @@ ${text}`;
     });
     if (row.parsed.issues.length > 0) {
       const warning = label.createSpan({ cls: "property-logs-row-warning" });
-      warning.setAttribute("aria-label", "Timeline data warning");
-      warning.setAttribute("title", row.parsed.issues.map((issue) => issue.message).join("\n"));
-      (0, import_obsidian8.setIcon)(warning, "triangle-alert");
+      applyTooltip(warning, row.parsed.issues.map((issue) => issue.message).join("\n"));
+      (0, import_obsidian9.setIcon)(warning, "triangle-alert");
     }
     return label;
   }
@@ -41413,7 +42063,10 @@ ${text}`;
 };
 
 // view/DashboardEmbed.ts
-var DashboardEmbed = class extends import_obsidian9.MarkdownRenderChild {
+var DEFAULT_EMBED_HEIGHT = 420;
+var MINIMAL_EMBED_HEIGHT = 220;
+var PRERENDER_MARGIN_PX = 600;
+var DashboardEmbed = class extends import_obsidian10.MarkdownRenderChild {
   constructor(app, host, containerEl, source, sourcePath) {
     super(containerEl);
     this.app = app;
@@ -41422,7 +42075,10 @@ var DashboardEmbed = class extends import_obsidian9.MarkdownRenderChild {
     this.sourcePath = sourcePath;
     this.timeline = null;
     this.resizeObserver = null;
+    this.visibilityObserver = null;
     this.rendered = false;
+    this.unloaded = false;
+    this.options = null;
   }
   async onload() {
     this.containerEl.addClass("property-logs-embed");
@@ -41430,13 +42086,17 @@ var DashboardEmbed = class extends import_obsidian9.MarkdownRenderChild {
     this.registerDomEvent(this.containerEl, "contextmenu", (event2) => {
       if (event2.ctrlKey) event2.stopPropagation();
     });
-    if (this.containerEl.clientWidth > 0) await this.renderEmbed();
-    else this.renderPlaceholder();
+    this.options = parseEmbedOptions(this.source);
+    this.renderPlaceholder();
+    this.observeVisibility();
     this.observeSize();
   }
   onunload() {
+    this.unloaded = true;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.visibilityObserver?.disconnect();
+    this.visibilityObserver = null;
     this.timeline?.destroy();
     this.timeline = null;
   }
@@ -41447,12 +42107,40 @@ var DashboardEmbed = class extends import_obsidian9.MarkdownRenderChild {
     if (typeof ResizeObserver === "undefined") return;
     this.resizeObserver = new ResizeObserver(() => {
       if (this.rendered || this.containerEl.clientWidth <= 0) return;
+      if (this.visibilityObserver && !this.isNearViewport()) return;
       void this.renderEmbed();
     });
     this.resizeObserver.observe(this.containerEl);
   }
+  /**
+   * Holds an off-screen embed at its reserved height until the reader
+   * approaches it. Without IntersectionObserver — and in a printed or exported
+   * note — every embed builds as soon as it has width, as it always did.
+   */
+  observeVisibility() {
+    if (typeof IntersectionObserver === "undefined") {
+      if (this.containerEl.clientWidth > 0) void this.renderEmbed();
+      return;
+    }
+    this.visibilityObserver = new IntersectionObserver((entries2) => {
+      if (!entries2.some((entry) => entry.isIntersecting)) return;
+      if (this.rendered || this.containerEl.clientWidth <= 0) return;
+      void this.renderEmbed();
+    }, { rootMargin: `${PRERENDER_MARGIN_PX}px 0px` });
+    this.visibilityObserver.observe(this.containerEl);
+  }
+  isNearViewport() {
+    const bounds = this.containerEl.getBoundingClientRect();
+    return bounds.bottom >= -PRERENDER_MARGIN_PX && bounds.top <= window.innerHeight + PRERENDER_MARGIN_PX;
+  }
+  /** The height the finished timeline will take, held while it is built. */
+  reservedHeight() {
+    if (this.options?.height) return this.options.height;
+    return this.options?.minimal ? MINIMAL_EMBED_HEIGHT : DEFAULT_EMBED_HEIGHT;
+  }
   renderPlaceholder() {
     this.containerEl.empty();
+    this.containerEl.style.minHeight = `${this.reservedHeight()}px`;
     const placeholder = this.containerEl.createDiv({ cls: "property-logs-loading" });
     for (let line = 0; line < 2; line++) {
       placeholder.createDiv({ cls: "property-logs-loading-line" });
@@ -41460,8 +42148,13 @@ var DashboardEmbed = class extends import_obsidian9.MarkdownRenderChild {
   }
   async renderEmbed() {
     this.rendered = true;
-    const options = parseEmbedOptions(this.source);
+    this.visibilityObserver?.disconnect();
+    this.visibilityObserver = null;
+    const options = this.options ?? parseEmbedOptions(this.source);
+    const context = await this.resolveContext(options.date, options.period);
+    if (this.unloaded) return;
     this.containerEl.empty();
+    this.containerEl.style.removeProperty("min-height");
     const dashboards = this.host.getDashboards();
     if (dashboards.length === 0) {
       this.renderMessage("Create a dashboard in Property Logs settings first.");
@@ -41477,19 +42170,15 @@ var DashboardEmbed = class extends import_obsidian9.MarkdownRenderChild {
       const warning = this.containerEl.createDiv({ cls: "property-logs-embed-warning" });
       options.errors.forEach((error) => warning.createDiv({ text: error }));
     }
-    const context = await this.resolveContext(options.date, options.period);
     const embedBody = this.containerEl.createDiv({ cls: "property-logs-embed-body" });
     const timelineEl = embedBody.createDiv({ cls: "property-logs-embed-timeline" });
     if (options.minimal) {
       const openDashboard = embedBody.createEl("button", {
         cls: "property-logs-minimal-open-dashboard clickable-icon",
-        attr: {
-          type: "button",
-          "aria-label": `Open ${dashboard.name} dashboard`,
-          title: `Open ${dashboard.name} dashboard`
-        }
+        attr: { type: "button" }
       });
-      (0, import_obsidian9.setIcon)(openDashboard, "maximize-2");
+      applyTooltip(openDashboard, `Open ${dashboard.name} dashboard`, "left");
+      (0, import_obsidian10.setIcon)(openDashboard, "maximize-2");
       openDashboard.addEventListener("click", (event2) => {
         event2.preventDefault();
         event2.stopPropagation();
@@ -41524,7 +42213,7 @@ var DashboardEmbed = class extends import_obsidian9.MarkdownRenderChild {
       };
     }
     const file = this.app.vault.getAbstractFileByPath(this.sourcePath);
-    if (!(file instanceof import_obsidian9.TFile)) return null;
+    if (!(file instanceof import_obsidian10.TFile)) return null;
     const context = await periodic.contextForFile(file);
     if (!context) return null;
     if (!explicitPeriod || explicitPeriod === context.granularity) return context;
@@ -41548,9 +42237,9 @@ function createEmbedProcessor(app, host, register) {
 }
 
 // view/TimelineView.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 var TIMELINE_VIEW_TYPE = "property-logs-timeline";
-var TimelineDashboardView = class extends import_obsidian10.ItemView {
+var TimelineDashboardView = class extends import_obsidian11.ItemView {
   constructor(leaf, host) {
     super(leaf);
     this.host = host;
@@ -41605,6 +42294,8 @@ var TimelineDashboardView = class extends import_obsidian10.ItemView {
 
 // main.ts
 var currentYear = (/* @__PURE__ */ new Date()).getFullYear();
+var REFRESH_DEBOUNCE_MS = 120;
+var TYPING_IDLE_MS = 700;
 var DEFAULT_SETTINGS = {
   includedFolders: [],
   includedTags: [],
@@ -41636,13 +42327,23 @@ var DEFAULT_SETTINGS = {
   weekStartsOn: 1,
   periodWindowDays: { ...DEFAULT_PERIOD_WINDOW_DAYS }
 };
-var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
+var PropertyLogsPlugin = class extends import_obsidian12.Plugin {
   constructor() {
     super(...arguments);
     this.previousStatuses = /* @__PURE__ */ new Map();
     this.previousPropertyValues = /* @__PURE__ */ new Map();
+    /** Vault scans and parsed histories, shared by every dashboard on screen. */
+    this.dataCache = new DashboardDataCache();
+    /** The periodic configuration the resolved contexts were cached under. */
+    this.periodicConfigSignature = "";
     this.embeds = /* @__PURE__ */ new Set();
     this.dashboardRefreshTimer = null;
+    /** Per file, a signature of the frontmatter a dashboard actually draws from. */
+    this.dashboardSignatures = /* @__PURE__ */ new Map();
+    /** When the editor last reported a keystroke, so rebuilds wait for a pause. */
+    this.lastEditorChangeAt = 0;
+    /** The note that keystroke landed in: only its own rebuild has to wait. */
+    this.lastEditorChangePath = "";
     this.settings = { ...DEFAULT_SETTINGS };
   }
   async onload() {
@@ -41677,7 +42378,7 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
       editorCallback: (editor) => {
         const dashboard = this.settings.dashboards[0];
         if (!dashboard) {
-          new import_obsidian11.Notice("Create a dashboard in Property Logs settings first.");
+          new import_obsidian12.Notice("Create a dashboard in Property Logs settings first.");
           return;
         }
         editor.replaceRange(
@@ -41698,7 +42399,7 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
       name: "Duplicate dashboard",
       callback: () => {
         if (this.settings.dashboards.length === 0) {
-          new import_obsidian11.Notice("Create a dashboard in Property Logs settings first.");
+          new import_obsidian12.Notice("Create a dashboard in Property Logs settings first.");
           return;
         }
         new DashboardPickerModal(this.app, {
@@ -41732,25 +42433,41 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
       this.loadAllStatuses();
     });
     this.registerEvent(
-      this.app.metadataCache.on("changed", (file) => {
-        void this.handleMetadataChange(file);
-        this.journalNoteIndex.invalidate(file.path);
-        this.refreshDashboardViews();
+      this.app.workspace.on("editor-change", (_editor, info) => {
+        this.lastEditorChangeAt = Date.now();
+        this.lastEditorChangePath = info.file?.path ?? "";
       })
     );
-    this.registerEvent(this.app.vault.on("create", () => this.refreshDashboardViews()));
+    this.registerEvent(
+      this.app.metadataCache.on("changed", (file) => {
+        void this.handleMetadataChange(file);
+        this.handleFileTouched(file);
+      })
+    );
+    this.registerEvent(this.app.vault.on("create", () => {
+      this.dataCache.invalidateAll();
+      this.journalNoteIndex.invalidate();
+      this.refreshDashboardViews();
+    }));
     this.registerEvent(this.app.vault.on("delete", (file) => {
       this.journalNoteIndex.invalidate(file.path);
+      this.periodicNotes.invalidate(file.path);
+      this.dataCache.invalidateFile(file.path);
+      this.dashboardSignatures.delete(file.path);
       this.refreshDashboardViews();
     }));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       this.journalNoteIndex.invalidate(oldPath);
       this.journalNoteIndex.invalidate(file.path);
+      this.periodicNotes.invalidate(oldPath);
+      this.periodicNotes.invalidate(file.path);
+      this.dataCache.invalidateAll();
+      this.dashboardSignatures.delete(oldPath);
+      this.dashboardSignatures.delete(file.path);
       this.refreshDashboardViews();
     }));
     this.registerEvent(this.app.vault.on("modify", (file) => {
-      this.journalNoteIndex.invalidate(file.path);
-      this.refreshDashboardViews();
+      if (file instanceof import_obsidian12.TFile) this.handleFileTouched(file);
     }));
   }
   getDashboards() {
@@ -41771,7 +42488,18 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
     return this.settings.dateKey;
   }
   getDashboardFiles(dashboard) {
-    return this.app.vault.getMarkdownFiles().filter((file) => {
+    const scopeKey = JSON.stringify(dashboard.scopeFilter);
+    const files = this.dataCache.scan(
+      `scope:${scopeKey}`,
+      () => this.app.vault.getMarkdownFiles().filter(
+        (file) => isFileInDashboardScope(this.scopeDataFor(file), dashboard.scopeFilter)
+      )
+    );
+    return [...files];
+  }
+  /** One note's tags and frontmatter, flattened the way a scope reads them. */
+  scopeDataFor(file) {
+    return this.dataCache.forFile("scope-data", file, "", () => {
       const cache = this.app.metadataCache.getFileCache(file);
       const tags = /* @__PURE__ */ new Set();
       const frontmatterTags = cache?.frontmatter?.tags;
@@ -41781,12 +42509,15 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
         tags.add(String(frontmatterTags).replace(/^#/, ""));
       }
       cache?.tags?.forEach((tag) => tags.add(tag.tag.replace(/^#/, "")));
-      return isFileInDashboardScope({
+      return {
         path: file.path,
         tags,
         frontmatter: cache?.frontmatter
-      }, dashboard.scopeFilter);
+      };
     });
+  }
+  getDataCache() {
+    return this.dataCache;
   }
   noteHasTrackedHistory(file, dashboard) {
     const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
@@ -41799,7 +42530,7 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
     return historyContainsKey(history, trackedHistoryKey);
   }
   async createDashboardNote(title, folder, dashboard) {
-    const normalizedFolder = (0, import_obsidian11.normalizePath)(folder).replace(/^\/+|\/+$/g, "");
+    const normalizedFolder = (0, import_obsidian12.normalizePath)(folder).replace(/^\/+|\/+$/g, "");
     if (normalizedFolder) {
       const segments = normalizedFolder.split("/");
       let current = "";
@@ -41810,7 +42541,7 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
         }
       }
     }
-    const path2 = (0, import_obsidian11.normalizePath)(normalizedFolder ? `${normalizedFolder}/${title}.md` : `${title}.md`);
+    const path2 = (0, import_obsidian12.normalizePath)(normalizedFolder ? `${normalizedFolder}/${title}.md` : `${title}.md`);
     if (this.app.vault.getAbstractFileByPath(path2)) {
       throw new Error(`A note already exists at ${path2}.`);
     }
@@ -41834,7 +42565,7 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
   async openDashboard(id) {
     const dashboard = this.getDashboard(id);
     if (!dashboard) {
-      new import_obsidian11.Notice("Property Logs dashboard not found.");
+      new import_obsidian12.Notice("Property Logs dashboard not found.");
       return;
     }
     const existing = this.app.workspace.getLeavesOfType(TIMELINE_VIEW_TYPE).find(
@@ -41852,12 +42583,70 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
     });
     await this.app.workspace.revealLeaf(leaf);
   }
-  refreshDashboardViews() {
+  /**
+   * Rebuilds every open dashboard once the events behind the change settle.
+   *
+   * `waitForFile` names the note the change came out of. While that same note
+   * is still being typed in, the rebuild waits for a pause: a dashboard that
+   * redraws under the cursor is the one thing guaranteed to interrupt the
+   * writing. Every other trigger — a value picked, a setting changed, a note
+   * created — is a deliberate action and redraws straight away.
+   */
+  refreshDashboardViews(waitForFile) {
     if (this.dashboardRefreshTimer !== null) window.clearTimeout(this.dashboardRefreshTimer);
+    const typingHere = waitForFile !== void 0 && waitForFile === this.lastEditorChangePath && Date.now() - this.lastEditorChangeAt < TYPING_IDLE_MS;
+    const delay = typingHere ? TYPING_IDLE_MS - (Date.now() - this.lastEditorChangeAt) + REFRESH_DEBOUNCE_MS : REFRESH_DEBOUNCE_MS;
     this.dashboardRefreshTimer = window.setTimeout(() => {
       this.dashboardRefreshTimer = null;
+      const stillTyping = waitForFile !== void 0 && waitForFile === this.lastEditorChangePath && Date.now() - this.lastEditorChangeAt < TYPING_IDLE_MS;
+      if (stillTyping) {
+        this.refreshDashboardViews(waitForFile);
+        return;
+      }
       this.refreshDashboardViewsNow();
-    }, 80);
+    }, delay);
+  }
+  /** True while a dashboard is on screen and worth keeping up to date. */
+  hasVisibleDashboards() {
+    return this.embeds.size > 0 || this.app.workspace.getLeavesOfType(TIMELINE_VIEW_TYPE).length > 0;
+  }
+  /** The frontmatter a dashboard draws from, flattened for comparison. */
+  dashboardSignature(file) {
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (!frontmatter) return "";
+    try {
+      return JSON.stringify(frontmatter);
+    } catch {
+      return String(file.stat.mtime);
+    }
+  }
+  /**
+   * Decides whether one edited note is worth a rebuild.
+   *
+   * Obsidian saves a note while it is still being typed in, so this fires
+   * through a sentence. A rebuild is only earned when the note's frontmatter
+   * or one of its marked journal lines actually reads differently than it did
+   * the last time a dashboard looked; ordinary prose leaves the timeline alone.
+   */
+  handleFileTouched(file) {
+    if (file.extension !== "md") return;
+    this.dataCache.invalidateFile(file.path);
+    this.periodicNotes.invalidate(file.path);
+    if (!this.hasVisibleDashboards()) {
+      this.journalNoteIndex.invalidate(file.path);
+      this.dashboardSignatures.delete(file.path);
+      return;
+    }
+    const signature2 = this.dashboardSignature(file);
+    if (this.dashboardSignatures.get(file.path) !== signature2) {
+      this.dashboardSignatures.set(file.path, signature2);
+      this.journalNoteIndex.invalidate(file.path);
+      this.refreshDashboardViews(file.path);
+      return;
+    }
+    void this.journalNoteIndex.syncFile(file).then((changed) => {
+      if (changed) this.refreshDashboardViews(file.path);
+    });
   }
   refreshDashboardViewsNow() {
     this.app.workspace.getLeavesOfType(TIMELINE_VIEW_TYPE).forEach((leaf) => {
@@ -41870,7 +42659,7 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
     const dashboards = this.getDashboards();
     const index = dashboards.findIndex((dashboard) => dashboard.id === id);
     if (index === -1) {
-      new import_obsidian11.Notice("Property Logs dashboard not found.");
+      new import_obsidian12.Notice("Property Logs dashboard not found.");
       return null;
     }
     const source = dashboards[index];
@@ -41924,6 +42713,18 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
   hasJournalsPlugin() {
     return this.periodicNotes.hasJournals();
   }
+  /**
+   * Drops the resolved periodic contexts when the configuration they were
+   * resolved under changes. Every other setting is already part of the cache
+   * keys, so an ordinary save leaves the parsed vault data alone.
+   */
+  syncPeriodicConfig() {
+    if (!this.periodicNotes) return;
+    const signature2 = JSON.stringify(this.periodicNotesConfig());
+    if (signature2 === this.periodicConfigSignature) return;
+    this.periodicConfigSignature = signature2;
+    this.periodicNotes.invalidate();
+  }
   periodicNotesConfig() {
     return {
       dailyFolder: this.settings.dailyNoteLog.folder,
@@ -41934,7 +42735,7 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
   }
   openDashboardPicker() {
     if (this.settings.dashboards.length === 0) {
-      new import_obsidian11.Notice("Create a dashboard in Property Logs settings first.");
+      new import_obsidian12.Notice("Create a dashboard in Property Logs settings first.");
     } else if (this.settings.dashboards.length === 1) {
       void this.openDashboard(this.settings.dashboards[0].id);
     } else {
@@ -41973,6 +42774,7 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
     }
   }
   async save() {
+    this.syncPeriodicConfig();
     await this.saveData({
       previousStatuses: Object.fromEntries(this.previousStatuses),
       previousPropertyValues: Object.fromEntries(this.previousPropertyValues),
@@ -42209,12 +43011,12 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
   }
   async getOrCreateDailyNote() {
     const { folder, format } = this.resolveDailyNoteConfig();
-    const filename = `${(0, import_obsidian11.moment)().format(format)}.md`;
-    const path2 = (0, import_obsidian11.normalizePath)(folder ? `${folder}/${filename}` : filename);
+    const filename = `${(0, import_obsidian12.moment)().format(format)}.md`;
+    const path2 = (0, import_obsidian12.normalizePath)(folder ? `${folder}/${filename}` : filename);
     const existing = this.app.vault.getAbstractFileByPath(path2);
-    if (existing instanceof import_obsidian11.TFile) return existing;
+    if (existing instanceof import_obsidian12.TFile) return existing;
     if (folder) {
-      const folderPath = (0, import_obsidian11.normalizePath)(folder);
+      const folderPath = (0, import_obsidian12.normalizePath)(folder);
       if (!this.app.vault.getAbstractFileByPath(folderPath)) {
         await this.app.vault.createFolder(folderPath);
       }
@@ -42273,7 +43075,7 @@ var PropertyLogsPlugin = class extends import_obsidian11.Plugin {
     if (filtered.length === 0) return;
     const dailyNote = await this.getOrCreateDailyNote();
     if (dailyNote.path === file.path) return;
-    const now2 = (0, import_obsidian11.moment)();
+    const now2 = (0, import_obsidian12.moment)();
     const date2 = now2.format("YYYY-MM-DD");
     const time = now2.format("HH:mm");
     for (const change of filtered) {
@@ -42481,7 +43283,7 @@ const chartData = {
 
 window.renderChart(chartData, this.container);`;
 }
-var InsertChartModal = class extends import_obsidian11.Modal {
+var InsertChartModal = class extends import_obsidian12.Modal {
   constructor(app, plugin) {
     super(app);
     this.plugin = plugin;
@@ -42494,22 +43296,22 @@ var InsertChartModal = class extends import_obsidian11.Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.createEl("h2", { text: "Insert Status Chart" });
-    new import_obsidian11.Setting(contentEl).setName("Folder").setDesc("Filter pages by folder path (e.g. Management). Leave empty for all folders.").addText(
+    new import_obsidian12.Setting(contentEl).setName("Folder").setDesc("Filter pages by folder path (e.g. Management). Leave empty for all folders.").addText(
       (text) => text.setValue(this.folder).onChange((val) => this.folder = val)
     );
-    new import_obsidian11.Setting(contentEl).setName("Tags").setDesc("Filter pages by tags, comma-separated without # (e.g. area, project). Leave empty for all tags.").addText(
+    new import_obsidian12.Setting(contentEl).setName("Tags").setDesc("Filter pages by tags, comma-separated without # (e.g. area, project). Leave empty for all tags.").addText(
       (text) => text.setValue(this.tags).onChange((val) => this.tags = val)
     );
-    new import_obsidian11.Setting(contentEl).setName("Period").setDesc("The time interval for each data point on the X axis.").addDropdown(
+    new import_obsidian12.Setting(contentEl).setName("Period").setDesc("The time interval for each data point on the X axis.").addDropdown(
       (dropdown) => dropdown.addOption("week", "Week").addOption("month", "Month").addOption("quarter", "Quarter").addOption("year", "Year").setValue(this.periodType).onChange((val) => this.periodType = val)
     );
-    new import_obsidian11.Setting(contentEl).setName("Start date").setDesc("Start of the date range (YYYY-MM-DD).").addText(
+    new import_obsidian12.Setting(contentEl).setName("Start date").setDesc("Start of the date range (YYYY-MM-DD).").addText(
       (text) => text.setValue(this.startDate).onChange((val) => this.startDate = val)
     );
-    new import_obsidian11.Setting(contentEl).setName("End date").setDesc("End of the date range (YYYY-MM-DD).").addText(
+    new import_obsidian12.Setting(contentEl).setName("End date").setDesc("End of the date range (YYYY-MM-DD).").addText(
       (text) => text.setValue(this.endDate).onChange((val) => this.endDate = val)
     );
-    new import_obsidian11.Setting(contentEl).addButton(
+    new import_obsidian12.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Insert").setCta().onClick(async () => {
         await this.insertChart();
         this.close();
@@ -42539,7 +43341,7 @@ var InsertChartModal = class extends import_obsidian11.Modal {
     editor.replaceRange("```dataviewjs\n" + chartCode + "\n```", editor.getCursor());
   }
 };
-var AddCommentModal = class extends import_obsidian11.Modal {
+var AddCommentModal = class extends import_obsidian12.Modal {
   constructor(app, plugin, file) {
     super(app);
     this.comment = "";
@@ -42549,7 +43351,7 @@ var AddCommentModal = class extends import_obsidian11.Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.createEl("h2", { text: "Add comment to note" });
-    new import_obsidian11.Setting(contentEl).setName("Comment").addText((text) => {
+    new import_obsidian12.Setting(contentEl).setName("Comment").addText((text) => {
       text.setPlaceholder("Enter comment\u2026").onChange((val) => this.comment = val);
       text.inputEl.style.width = "100%";
       text.inputEl.addEventListener("keydown", (e) => {
@@ -42559,7 +43361,7 @@ var AddCommentModal = class extends import_obsidian11.Modal {
       });
       setTimeout(() => text.inputEl.focus(), 50);
     });
-    new import_obsidian11.Setting(contentEl).addButton(
+    new import_obsidian12.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Add").setCta().onClick(() => this.submit())
     ).addButton(
       (btn) => btn.setButtonText("Cancel").onClick(() => this.close())
@@ -42587,7 +43389,7 @@ var AddCommentModal = class extends import_obsidian11.Modal {
     this.close();
   }
 };
-var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
+var StatusHistorySettingTab = class extends import_obsidian12.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -42684,13 +43486,13 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
     );
     const behaviorPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
     behaviorPane.setAttribute("data-tab", "behavior");
-    new import_obsidian11.Setting(behaviorPane).setName("Overwrite same-day entries").setDesc("When enabled, only the latest status change per day is kept instead of logging every change.").addToggle(
+    new import_obsidian12.Setting(behaviorPane).setName("Overwrite same-day entries").setDesc("When enabled, only the latest status change per day is kept instead of logging every change.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.overwriteSameDay).onChange(async (value) => {
         this.plugin.settings.overwriteSameDay = value;
         await this.plugin.save();
       })
     );
-    new import_obsidian11.Setting(behaviorPane).setName("Skip duplicate status").setDesc("When enabled, a status change is not logged if it is the same as the most recent entry in the history.").addToggle(
+    new import_obsidian12.Setting(behaviorPane).setName("Skip duplicate status").setDesc("When enabled, a status change is not logged if it is the same as the most recent entry in the history.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.skipDuplicateStatus).onChange(async (value) => {
         this.plugin.settings.skipDuplicateStatus = value;
         await this.plugin.save();
@@ -42701,19 +43503,19 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
       text: "Customize the frontmatter keys used when writing history entries.",
       cls: "setting-item-description"
     });
-    new import_obsidian11.Setting(behaviorPane).setName("History key").setDesc("The frontmatter key for the history array (default: status_history).").addText(
+    new import_obsidian12.Setting(behaviorPane).setName("History key").setDesc("The frontmatter key for the history array (default: status_history).").addText(
       (text) => text.setPlaceholder("status_history").setValue(this.plugin.settings.historyKey).onChange(async (val) => {
         this.plugin.settings.historyKey = val || "status_history";
         await this.plugin.save();
       })
     );
-    new import_obsidian11.Setting(behaviorPane).setName("Date key").setDesc("The key used for the date within each history entry (default: dateSet).").addText(
+    new import_obsidian12.Setting(behaviorPane).setName("Date key").setDesc("The key used for the date within each history entry (default: dateSet).").addText(
       (text) => text.setPlaceholder("dateSet").setValue(this.plugin.settings.dateKey).onChange(async (val) => {
         this.plugin.settings.dateKey = val || "dateSet";
         await this.plugin.save();
       })
     );
-    new import_obsidian11.Setting(behaviorPane).setName("Status key").setDesc("The key used for the status value within each history entry (default: statusSet).").addText(
+    new import_obsidian12.Setting(behaviorPane).setName("Status key").setDesc("The key used for the status value within each history entry (default: statusSet).").addText(
       (text) => text.setPlaceholder("statusSet").setValue(this.plugin.settings.statusKey).onChange(async (val) => {
         this.plugin.settings.statusKey = val || "statusSet";
         await this.plugin.save();
@@ -42730,7 +43532,7 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
       const props = this.plugin.settings.additionalProperties;
       for (let i2 = 0; i2 < props.length; i2++) {
         const item = props[i2];
-        new import_obsidian11.Setting(propListEl).setName(`${item.frontmatterKey} \u2192 ${item.historyKey}`).addButton(
+        new import_obsidian12.Setting(propListEl).setName(`${item.frontmatterKey} \u2192 ${item.historyKey}`).addButton(
           (btn) => btn.setIcon("arrow-up").setTooltip("Move up").setDisabled(i2 === 0).onClick(async () => {
             [props[i2 - 1], props[i2]] = [props[i2], props[i2 - 1]];
             await this.plugin.save();
@@ -42768,7 +43570,7 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
       histKeyInput.setValue("");
       renderPropList();
     };
-    new import_obsidian11.Setting(behaviorPane).addText((text) => {
+    new import_obsidian12.Setting(behaviorPane).addText((text) => {
       fmKeyInput = text;
       text.setPlaceholder("Frontmatter key (e.g. deadline)");
       text.inputEl.addEventListener("keydown", (e) => {
@@ -42799,31 +43601,31 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
       text: "Default values pre-filled when using the 'Insert status chart' command. Updated automatically when you insert a chart.",
       cls: "setting-item-description"
     });
-    new import_obsidian11.Setting(chartPane).setName("Default folder").setDesc("Folder path to filter pages by (e.g. Management).").addText(
+    new import_obsidian12.Setting(chartPane).setName("Default folder").setDesc("Folder path to filter pages by (e.g. Management).").addText(
       (text) => text.setPlaceholder("e.g. Management").setValue(this.plugin.settings.chartDefaults.folder).onChange(async (val) => {
         this.plugin.settings.chartDefaults.folder = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian11.Setting(chartPane).setName("Default tags").setDesc("Tags to filter pages by, comma-separated without # (e.g. area, project).").addText(
+    new import_obsidian12.Setting(chartPane).setName("Default tags").setDesc("Tags to filter pages by, comma-separated without # (e.g. area, project).").addText(
       (text) => text.setPlaceholder("e.g. area, project").setValue(this.plugin.settings.chartDefaults.tags).onChange(async (val) => {
         this.plugin.settings.chartDefaults.tags = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian11.Setting(chartPane).setName("Default period").setDesc("The time interval for each data point.").addDropdown(
+    new import_obsidian12.Setting(chartPane).setName("Default period").setDesc("The time interval for each data point.").addDropdown(
       (dropdown) => dropdown.addOption("week", "Week").addOption("month", "Month").addOption("quarter", "Quarter").addOption("year", "Year").setValue(this.plugin.settings.chartDefaults.periodType).onChange(async (val) => {
         this.plugin.settings.chartDefaults.periodType = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian11.Setting(chartPane).setName("Default start date").setDesc("Start of the date range (YYYY-MM-DD).").addText(
+    new import_obsidian12.Setting(chartPane).setName("Default start date").setDesc("Start of the date range (YYYY-MM-DD).").addText(
       (text) => text.setPlaceholder(`${currentYear}-01-01`).setValue(this.plugin.settings.chartDefaults.startDate).onChange(async (val) => {
         this.plugin.settings.chartDefaults.startDate = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian11.Setting(chartPane).setName("Default end date").setDesc("End of the date range (YYYY-MM-DD).").addText(
+    new import_obsidian12.Setting(chartPane).setName("Default end date").setDesc("End of the date range (YYYY-MM-DD).").addText(
       (text) => text.setPlaceholder(`${currentYear}-12-31`).setValue(this.plugin.settings.chartDefaults.endDate).onChange(async (val) => {
         this.plugin.settings.chartDefaults.endDate = val;
         await this.plugin.save();
@@ -42833,7 +43635,7 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
   }
   renderDailyNoteLogPane(pane) {
     const settings = this.plugin.settings.dailyNoteLog;
-    new import_obsidian11.Setting(pane).setName("Enable daily note logging").setDesc("Append a log entry to the daily note whenever a tracked property changes on a watched file.").addToggle(
+    new import_obsidian12.Setting(pane).setName("Enable daily note logging").setDesc("Append a log entry to the daily note whenever a tracked property changes on a watched file.").addToggle(
       (toggle) => toggle.setValue(settings.enabled).onChange(async (value) => {
         this.plugin.settings.dailyNoteLog.enabled = value;
         await this.plugin.save();
@@ -42844,19 +43646,19 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
       text: "If the core Daily Notes plugin is enabled, its folder and date format are used. Otherwise the values below are used as a fallback.",
       cls: "setting-item-description"
     });
-    new import_obsidian11.Setting(pane).setName("Folder (fallback)").setDesc("Folder where daily notes are stored. Leave empty for the vault root.").addText(
+    new import_obsidian12.Setting(pane).setName("Folder (fallback)").setDesc("Folder where daily notes are stored. Leave empty for the vault root.").addText(
       (text) => text.setPlaceholder("e.g. Daily").setValue(settings.folder).onChange(async (val) => {
         this.plugin.settings.dailyNoteLog.folder = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian11.Setting(pane).setName("Date format (fallback)").setDesc("Moment.js format used for the daily note filename (e.g. YYYY-MM-DD).").addText(
+    new import_obsidian12.Setting(pane).setName("Date format (fallback)").setDesc("Moment.js format used for the daily note filename (e.g. YYYY-MM-DD).").addText(
       (text) => text.setPlaceholder("YYYY-MM-DD").setValue(settings.dateFormat).onChange(async (val) => {
         this.plugin.settings.dailyNoteLog.dateFormat = val;
         await this.plugin.save();
       })
     );
-    new import_obsidian11.Setting(pane).setName("Heading (optional)").setDesc("If set, log entries are inserted under this heading (e.g. '## Status Changes'). The heading is created if missing. Leave empty to append to the end of the daily note.").addText(
+    new import_obsidian12.Setting(pane).setName("Heading (optional)").setDesc("If set, log entries are inserted under this heading (e.g. '## Status Changes'). The heading is created if missing. Leave empty to append to the end of the daily note.").addText(
       (text) => text.setPlaceholder("e.g. ## Status Changes").setValue(settings.heading).onChange(async (val) => {
         this.plugin.settings.dailyNoteLog.heading = val;
         await this.plugin.save();
@@ -42877,7 +43679,7 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
       const groups = this.plugin.settings.dailyNoteLog.groups;
       groups.forEach((group, i2) => {
         const card = groupsEl.createDiv({ cls: "status-history-group-card" });
-        new import_obsidian11.Setting(card).setName(`Group ${i2 + 1}${group.tag ? `: #${group.tag}` : ""}`).addButton(
+        new import_obsidian12.Setting(card).setName(`Group ${i2 + 1}${group.tag ? `: #${group.tag}` : ""}`).addButton(
           (btn) => btn.setIcon("arrow-up").setTooltip("Move up").setDisabled(i2 === 0).onClick(async () => {
             [groups[i2 - 1], groups[i2]] = [groups[i2], groups[i2 - 1]];
             await this.plugin.save();
@@ -42896,25 +43698,25 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
             renderGroups();
           })
         );
-        new import_obsidian11.Setting(card).setName("Tag").setDesc("Notes carrying this tag use this group's template (without '#').").addText(
+        new import_obsidian12.Setting(card).setName("Tag").setDesc("Notes carrying this tag use this group's template (without '#').").addText(
           (text) => text.setPlaceholder("e.g. project").setValue(group.tag).onChange(async (val) => {
             group.tag = val.trim().replace(/^#/, "");
             await this.plugin.save();
           })
         );
-        new import_obsidian11.Setting(card).setName("Watched property keys").setDesc("Comma-separated frontmatter keys this group logs (e.g. status, deadline). Leave empty to log every tracked change.").addText(
+        new import_obsidian12.Setting(card).setName("Watched property keys").setDesc("Comma-separated frontmatter keys this group logs (e.g. status, deadline). Leave empty to log every tracked change.").addText(
           (text) => text.setPlaceholder("status, deadline").setValue(group.watchedKeys.join(", ")).onChange(async (val) => {
             group.watchedKeys = val.split(",").map((k) => k.trim()).filter((k) => k);
             await this.plugin.save();
           })
         );
-        new import_obsidian11.Setting(card).setName("{{key}} uses").setDesc("Which name to substitute for the {{key}} placeholder.").addDropdown(
+        new import_obsidian12.Setting(card).setName("{{key}} uses").setDesc("Which name to substitute for the {{key}} placeholder.").addDropdown(
           (dropdown) => dropdown.addOption("frontmatter", "Frontmatter key (e.g. status)").addOption("history", "History key (e.g. statusSet)").setValue(group.keyForm).onChange(async (val) => {
             group.keyForm = val;
             await this.plugin.save();
           })
         );
-        const templateSetting = new import_obsidian11.Setting(card).setName("Template").setDesc("Line written to the daily note. Multiple lines are supported.");
+        const templateSetting = new import_obsidian12.Setting(card).setName("Template").setDesc("Line written to the daily note. Multiple lines are supported.");
         templateSetting.addTextArea((text) => {
           text.setPlaceholder("- {{link}}: {{key}} changed from {{from}} to {{to}}").setValue(group.template).onChange(async (val) => {
             group.template = val;
@@ -42927,7 +43729,7 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
       });
     };
     renderGroups();
-    new import_obsidian11.Setting(pane).addButton(
+    new import_obsidian12.Setting(pane).addButton(
       (btn) => btn.setButtonText("Add group").setCta().onClick(async () => {
         this.plugin.settings.dailyNoteLog.groups.push({
           tag: "",
@@ -42947,7 +43749,7 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
     const renderList = () => {
       listEl.empty();
       for (const item of getItems()) {
-        new import_obsidian11.Setting(listEl).setName(item).addButton(
+        new import_obsidian12.Setting(listEl).setName(item).addButton(
           (btn) => btn.setIcon("trash").setTooltip("Remove").onClick(async () => {
             await onRemove(item);
             renderList();
@@ -42964,7 +43766,7 @@ var StatusHistorySettingTab = class extends import_obsidian11.PluginSettingTab {
       input.setValue("");
       renderList();
     };
-    new import_obsidian11.Setting(containerEl).addText((text) => {
+    new import_obsidian12.Setting(containerEl).addText((text) => {
       input = text;
       text.setPlaceholder(placeholder);
       text.inputEl.addEventListener("keydown", (e) => {

@@ -1,5 +1,6 @@
 import { App, Menu, Platform, TFile, setIcon } from "obsidian";
 import {
+  DataSet,
   Timeline,
   TimelineAnimationOptions,
   TimelineEventPropertiesResult,
@@ -12,6 +13,7 @@ import {
   DashboardSettings,
   displayPropertyValue,
 } from "../data/dashboard";
+import { DashboardDataCache } from "../data/dashboardCache";
 import { timelineColorStyle } from "../data/colorPalette";
 import {
   HistoryParserResult,
@@ -38,6 +40,7 @@ import { PeriodicNotes } from "../integrations/periodicNotes";
 import { AddTopicModal, TopicHost } from "../modals/AddTopicModal";
 import { openValuePicker } from "../modals/SetValueModal";
 import { PeriodAxis } from "./PeriodAxis";
+import { applyTooltip } from "./tooltips";
 
 export interface DashboardHost extends TopicHost {
   getDashboards(): DashboardSettings[];
@@ -51,6 +54,7 @@ export interface DashboardHost extends TopicHost {
   getJournalMarkers(): JournalMarkerStyle[];
   getPeriodicNotes(): PeriodicNotes;
   getJournalNoteIndex(): JournalNoteIndex;
+  getDataCache(): DashboardDataCache;
   getWeekStartsOn(): number;
   getPeriodWindowDays(): Record<PeriodGranularity, number>;
   save(): Promise<void>;
@@ -85,16 +89,74 @@ interface TimelineRow {
   recentChange: number;
 }
 
-/** Mutable collections owned by one vis-timeline instance.
+/**
+ * One row or block, described before any of it is built.
  *
- * Journal notes arrive after the primary timeline has drawn. Keeping these
- * collections lets us attach them without tearing down a usable dashboard.
+ * `contentKey` is everything the element is drawn from, so a redraw can tell
+ * the blocks that actually changed from the ones that only got recomputed:
+ * unchanged blocks keep the DOM they already have, which is what makes an
+ * edit somewhere in the vault cost a few elements rather than all of them.
  */
-interface RenderedTimelineData {
-  items: TimelineItem[];
-  groups: TimelineGroup[];
-  journalItems: Map<string, JournalNote>;
+interface PlanItem {
+  id: string;
+  props: Omit<TimelineItem, "content">;
+  contentKey: string;
+  createContent: () => HTMLElement;
+}
+
+interface PlanGroup {
+  id: string;
+  props: Omit<TimelineGroup, "content">;
+  contentKey: string;
+  createContent: () => HTMLElement;
+}
+
+/**
+ * One day of a folded row: how many notes sit there, and which. The set is
+ * what stops a note that spans the day from being counted once per segment.
+ */
+interface DayTally {
+  notes: string[];
+  counted: Set<string>;
+}
+
+/** Everything one drawn dashboard consists of, as plain data. */
+interface TimelineModel {
+  items: PlanItem[];
+  groups: PlanGroup[];
+  itemRows: Map<string, TimelineRow>;
+  journalNotes: Map<string, JournalNote>;
+  /** note path → the group that note occupies, for attaching linked journal notes. */
   noteGroupIds: Map<string, string>;
+  groupLabelText: Map<string, string>;
+}
+
+/** What was last handed to vis-timeline for one id. */
+interface AppliedEntry {
+  contentKey: string;
+  propsKey: string;
+}
+
+function planSignature(props: Record<string, unknown>): string {
+  return JSON.stringify(props);
+}
+
+/**
+ * The parent/child links between groups. vis-timeline resolves nesting once,
+ * when groups are added, and keeps a pointer on each child back to its parent,
+ * so a note moving between buckets is the one change an update in place cannot
+ * express: that one is rebuilt.
+ */
+function nestedGroupSignature(groups: PlanGroup[]): string {
+  return groups
+    .filter((group) => group.props.nestedGroups !== undefined)
+    .map((group) => `${group.id}:${(group.props.nestedGroups ?? []).join(",")}`)
+    .join("|");
+}
+
+/** Everything a drawn journal note carries, for spotting a collect that changed nothing. */
+function journalSignature(notes: JournalNote[]): string {
+  return notes.map((note) => `${note.id}\u0000${note.marker}\u0000${note.text}`).join("\u0001");
 }
 
 const DAY_MS = 1000 * 60 * 60 * 24;
@@ -190,8 +252,66 @@ function addDays(date: Date, days: number): Date {
  */
 const CURRENT_TODAY_OVERFLOW_DAYS = 3;
 
+/** Pixels between a note's name and the line that follows it. */
+const SEGMENT_LINE_GAP = 4;
+
+/** The one subgroup every day count is drawn in, which is what keeps them on a single line. */
+const DAY_COUNT_SUBGROUP = "day-counts";
+
+/** How many notes a day's hint names before it stops and counts the rest. */
+const DAY_COUNT_TOOLTIP_LIMIT = 12;
+
+/** A ceiling on the days one segment is walked over; a guard, not a design limit. */
+const MAX_COUNTED_DAYS = 4000;
+
 function centerOf(range: PeriodRange): Date {
   return new Date((range.start.getTime() + range.end.getTime()) / 2);
+}
+
+function startOfDay(date: Date): Date {
+  const day = new Date(date);
+  day.setHours(0, 0, 0, 0);
+  return day;
+}
+
+/** Noon of a day, so its count sits in the middle of that column at any zoom. */
+function middayOf(day: string): Date {
+  const [year, month, date] = day.split("-").map(Number);
+  return new Date(year, month - 1, date, 12);
+}
+
+/**
+ * Whether a segment is the value a note still holds.
+ *
+ * Being the last one drawn is not enough. A value mapped to level 0 is hidden
+ * rather than drawn, so a note whose latest change lands on one — `relevant`
+ * going back to `false`, say — has no segment for where it stands now, and the
+ * last segment on screen is one that ended. The parser records the level of
+ * that latest change either way, which is what tells the two apart.
+ */
+function isOngoingSegment(row: TimelineRow, segmentIndex: number): boolean {
+  return segmentIndex === row.parsed.segments.length - 1 && row.parsed.currentLevel !== 0;
+}
+
+/**
+ * The days one segment covers, as local dates.
+ *
+ * History segments are half-open — a value ends where the next one starts — so
+ * the closing day belongs to the segment that follows it. The exception is the
+ * value a note still holds, whose end is today and whose today counts.
+ */
+function segmentDays(segment: TimelineSegment, isCurrent: boolean): string[] {
+  const days: string[] = [];
+  const cursor = startOfDay(segment.start);
+  const last = startOfDay(isCurrent ? segment.end : addDays(segment.end, -1));
+  while (cursor.getTime() <= last.getTime() && days.length < MAX_COUNTED_DAYS) {
+    days.push(localDate(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  // Two changes on one day leave a segment no days of its own; it still
+  // happened, so it is counted on the day it started.
+  if (days.length === 0) days.push(localDate(segment.start));
+  return days;
 }
 
 /**
@@ -200,6 +320,18 @@ function centerOf(range: PeriodRange): Date {
  */
 export class DashboardTimeline {
   private timeline: Timeline | null = null;
+  /** The collections vis-timeline draws from, updated in place between renders. */
+  private itemsData: DataSet<TimelineItem> | null = null;
+  private groupsData: DataSet<TimelineGroup> | null = null;
+  /** What each id was last drawn as, so a redraw only touches what moved. */
+  private appliedItems = new Map<string, AppliedEntry>();
+  private appliedGroups = new Map<string, AppliedEntry>();
+  private nestedSignature = "";
+  private itemRows = new Map<string, TimelineRow>();
+  private journalNotesById = new Map<string, JournalNote>();
+  /** The journal notes on screen, redrawn straight away while the next read runs. */
+  private journalNotes: JournalNote[] = [];
+  private journalNotesKey: string | null = null;
   private axis: PeriodAxis | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private renderToken = 0;
@@ -214,6 +346,14 @@ export class DashboardTimeline {
   private labelFoldButtons: HTMLButtonElement[] = [];
   /** Group id → the value shown for it, for drawing into rows when folded. */
   private groupLabelText = new Map<string, string>();
+  /** What the last completed render was of, so a rebuild can tell it apart. */
+  private renderedKey: string | null = null;
+  /** The shape that render was built in; anything else needs a fresh build. */
+  private renderedLayoutKey: string | null = null;
+  /** The window that render was showing, to be handed back to its successor. */
+  private preservedWindow: { key: string; start: Date; end: Date } | null = null;
+  /** Width of each folded name at rest, measured once so redraws stay cheap. */
+  private segmentLabelWidths = new WeakMap<HTMLElement, number>();
 
   constructor(
     private readonly app: App,
@@ -248,6 +388,10 @@ export class DashboardTimeline {
 
   destroy(): void {
     this.renderToken++;
+    this.renderedKey = null;
+    this.preservedWindow = null;
+    this.journalNotes = [];
+    this.journalNotesKey = null;
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
     this.destroyTimeline();
@@ -261,12 +405,40 @@ export class DashboardTimeline {
     this.axis = null;
     this.timeline?.destroy();
     this.timeline = null;
+    this.itemsData = null;
+    this.groupsData = null;
+    this.appliedItems.clear();
+    this.appliedGroups.clear();
+    this.nestedSignature = "";
+    this.itemRows.clear();
+    this.journalNotesById.clear();
+    this.renderedLayoutKey = null;
     this.timelineEl = null;
     this.dividersEl = null;
   }
 
   async render(): Promise<void> {
     const token = ++this.renderToken;
+    const dashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
+    if (!dashboard) {
+      this.destroyTimeline();
+      this.containerEl.empty();
+      this.containerEl.addClass("property-logs-dashboard");
+      this.renderNoDashboard();
+      return;
+    }
+    this.dashboardId = dashboard.id;
+    // A rebuild throws every block away and lays the calendar out from scratch.
+    // When the change is one the drawn timeline can absorb — an edited note, a
+    // new status, another colour mode — the data is updated in place instead,
+    // which is both far cheaper and leaves the view where the user left it.
+    if (this.canUpdateInPlace(dashboard) && this.updateInPlace(token, dashboard)) return;
+    await this.renderFull(token, dashboard);
+  }
+
+  /** Tears the dashboard down and builds it again, skeleton and all. */
+  private async renderFull(token: number, dashboard: DashboardSettings): Promise<void> {
+    this.preserveWindow();
     this.destroyTimeline();
     this.containerEl.empty();
     this.labelFoldButtons = [];
@@ -274,13 +446,6 @@ export class DashboardTimeline {
     this.containerEl.toggleClass("is-compact", this.options.compact === true);
     this.containerEl.toggleClass("is-minimal", this.options.minimal === true);
     this.containerEl.toggleClass("is-mobile-layout", Platform.isMobile);
-
-    const dashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
-    if (!dashboard) {
-      this.renderNoDashboard();
-      return;
-    }
-    this.dashboardId = dashboard.id;
     this.containerEl.toggleClass("is-labels-collapsed", dashboard.collapsedLabels);
 
     const header = this.containerEl.createDiv({ cls: "property-logs-toolbar" });
@@ -296,23 +461,29 @@ export class DashboardTimeline {
     // the toolbar property picker instead of walking every file twice.
     const files = this.host.getDashboardFiles(dashboard);
     const rows = this.buildRows(dashboard, files);
-    const visible = this.resolveWindow();
+    const visible = this.restoredWindow() ?? this.resolveWindow();
+    // Notes read for a different dashboard, or a different period, describe
+    // nothing that is about to be drawn.
+    if (this.journalNotesKey !== this.viewKey()) this.journalNotes = [];
 
-    if (this.options.showToolbar === false) header.remove();
-    else if (this.options.compact) this.renderCompactHeader(header, dashboard);
-    else this.renderToolbar(header, dashboard, this.collectProperties(rows, dashboard, files));
+    this.renderHeader(header, dashboard, files);
     loading.remove();
 
     if (rows.length === 0 && !dashboard.showJournalNotes) {
+      this.journalNotes = [];
       this.renderEmptyState(dashboard);
       return;
     }
 
     try {
-      const rendered = this.renderTimeline(rows, dashboard, visible);
+      const model = this.buildModel(rows, dashboard);
+      // The notes from the last read go back up with the first draw, so a
+      // rebuild does not blink them out while the vault is read again.
+      this.addJournalItems(model, this.journalNotes, dashboard);
+      this.mountTimeline(model, dashboard, visible);
       // Reading marked journal lines can involve disk reads. Do it after the
       // dashboard is interactive; the update below keeps its current window.
-      void this.addJournalNotesAfterInitialDraw(token, dashboard, visible, rendered);
+      void this.syncJournalNotes(token, dashboard, visible, rows.length > 0);
     } catch (error) {
       console.error("Property Logs could not render the timeline", error);
       this.renderTimelineError(error);
@@ -321,8 +492,95 @@ export class DashboardTimeline {
     void this.refreshOpenableGranularities();
   }
 
+  /**
+   * Feeds new data to the timeline that is already on screen. Returns false
+   * when the change is one only a rebuild can express, leaving nothing behind.
+   */
+  private updateInPlace(token: number, dashboard: DashboardSettings): boolean {
+    const files = this.host.getDashboardFiles(dashboard);
+    const rows = this.buildRows(dashboard, files);
+    // An emptied dashboard shows guidance instead of a timeline, which is the
+    // full path's job.
+    if (rows.length === 0 && this.journalNotes.length === 0) return false;
+
+    const model = this.buildModel(rows, dashboard);
+    this.addJournalItems(model, this.journalNotes, dashboard);
+    if (!this.applyModel(model)) return false;
+
+    this.containerEl.toggleClass("is-labels-collapsed", dashboard.collapsedLabels);
+    this.refreshHeader(dashboard, files);
+    this.syncFloatingLabels();
+    this.syncSegmentLines();
+    this.updateAxis(true);
+    void this.syncJournalNotes(token, dashboard, this.currentWindow(), rows.length > 0);
+    return true;
+  }
+
+  /** The span on screen right now, which an update in place leaves alone. */
+  private currentWindow(): PeriodRange {
+    if (!this.timeline) return this.resolveWindow();
+    const visible = this.timeline.getWindow();
+    return { start: new Date(visible.start), end: new Date(visible.end) };
+  }
+
+  /** Whether the drawn timeline can take this dashboard's data as an update. */
+  private canUpdateInPlace(dashboard: DashboardSettings): boolean {
+    return this.timeline !== null
+      && this.itemsData !== null
+      && this.timelineEl !== null
+      && this.containerEl.contains(this.timelineEl)
+      && this.renderedKey === this.viewKey()
+      && this.renderedLayoutKey === this.layoutKey(dashboard);
+  }
+
+  /**
+   * The shape the timeline was built in. Grouping, folding and the calendar
+   * axis decide how vis-timeline is wired together rather than what it holds,
+   * so a change to any of them starts again.
+   */
+  private layoutKey(dashboard: DashboardSettings): string {
+    return [
+      dashboard.groupBy,
+      String(dashboard.showPeriodAxis),
+      String(dashboard.showJournalNotes),
+      [...dashboard.foldedGroups].sort().join(","),
+      String(this.options.compact === true),
+      String(this.options.minimal === true),
+      String(this.options.showToolbar === false),
+      String(this.options.maxHeight ?? ""),
+    ].join("|");
+  }
+
+  private renderHeader(header: HTMLElement, dashboard: DashboardSettings, files: TFile[]): void {
+    if (this.options.showToolbar === false) header.remove();
+    else if (this.options.compact) this.renderCompactHeader(header, dashboard);
+    else this.renderToolbar(header, dashboard, this.collectProperties(dashboard, files));
+  }
+
+  /** Redraws the toolbar over a timeline that is staying put. */
+  private refreshHeader(dashboard: DashboardSettings, files: TFile[]): void {
+    if (this.options.showToolbar === false) return;
+    const header = this.containerEl.querySelector<HTMLElement>(
+      ":scope > .property-logs-toolbar"
+    );
+    if (!header) return;
+    this.labelFoldButtons = this.labelFoldButtons.filter((button) => !header.contains(button));
+    header.empty();
+    header.removeClass("property-logs-toolbar-compact");
+    if (this.options.compact) this.renderCompactHeader(header, dashboard);
+    else this.renderToolbar(header, dashboard, this.collectProperties(dashboard, files));
+  }
+
   // ─── Data ──────────────────────────────────────────────────────────────────
 
+  /**
+   * Parses each in-scope note's history into the row a timeline draws.
+   *
+   * A note's row depends on nothing but that note and the settings behind it,
+   * so it is kept until the note is written to or one of those settings moves
+   * — the day included, since an ongoing status runs up to today. An edit
+   * anywhere in the vault then reparses one note rather than all of them.
+   */
   private buildRows(dashboard: DashboardSettings, files: TFile[]): TimelineRow[] {
     if (!dashboard.trackedPropertyKey.trim()) return [];
     const today = new Date();
@@ -332,56 +590,77 @@ export class DashboardTimeline {
     const globalStyles = this.host.getGlobalValueStyles();
     const globalLevels = globalLevelMapping(globalStyles);
     const valueColors = resolveValueColors(globalStyles, dashboard.valueColors);
+    const parseKey = JSON.stringify({
+      trackedHistoryKey,
+      dateKey,
+      historyKey,
+      day: localDate(today),
+      levelMapping: dashboard.levelMapping,
+      globalLevels,
+      defaultLevelForUnset: dashboard.defaultLevelForUnset,
+      unmappedValueLevel: dashboard.unmappedValueLevel,
+      colorMode: dashboard.colorMode,
+      levelColors: dashboard.levelColors,
+      colorProperty: dashboard.colorProperty,
+      colorPropertyMap: dashboard.colorPropertyMap,
+      valueColors,
+    });
+    const cache = this.host.getDataCache();
 
     return files.flatMap((file) => {
-      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as
-        | Record<string, unknown>
-        | undefined;
-      const metadata = frontmatter ?? {};
-      const history = collectCompatibleHistory(metadata, historyKey, dateKey);
-      const parsed = reconstructHistorySegments({
-        history,
-        trackedHistoryKey,
-        dateKey,
-        creationDate: file.stat.ctime,
-        today,
-        levelMapping: dashboard.levelMapping,
-        globalLevelMapping: globalLevels,
-        defaultLevelForUnset: dashboard.defaultLevelForUnset,
-        unmappedValueLevel: dashboard.unmappedValueLevel,
-        colorMode: dashboard.colorMode,
-        levelColors: dashboard.levelColors,
-        colorPropertyValue: metadata[dashboard.colorProperty],
-        colorPropertyMap: dashboard.colorPropertyMap,
-        valueColors,
+      const row = cache.forFile("row", file, parseKey, (): TimelineRow | null => {
+        const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as
+          | Record<string, unknown>
+          | undefined;
+        const metadata = frontmatter ?? {};
+        const history = collectCompatibleHistory(metadata, historyKey, dateKey);
+        const parsed = reconstructHistorySegments({
+          history,
+          trackedHistoryKey,
+          dateKey,
+          creationDate: file.stat.ctime,
+          today,
+          levelMapping: dashboard.levelMapping,
+          globalLevelMapping: globalLevels,
+          defaultLevelForUnset: dashboard.defaultLevelForUnset,
+          unmappedValueLevel: dashboard.unmappedValueLevel,
+          colorMode: dashboard.colorMode,
+          levelColors: dashboard.levelColors,
+          colorPropertyValue: metadata[dashboard.colorProperty],
+          colorPropertyMap: dashboard.colorPropertyMap,
+          valueColors,
+        });
+        if (parsed.segments.length === 0 && !parsed.malformed) return null;
+        return {
+          file,
+          frontmatter: metadata,
+          history,
+          parsed,
+          level: parsed.currentLevel,
+          recentChange: latestTrackedDate(history, trackedHistoryKey, dateKey),
+        };
       });
-      if (parsed.segments.length === 0 && !parsed.malformed) return [];
-      return [{
-        file,
-        frontmatter: metadata,
-        history,
-        parsed,
-        level: parsed.currentLevel,
-        recentChange: latestTrackedDate(history, trackedHistoryKey, dateKey),
-      }];
+      return row ? [row] : [];
     });
   }
 
-  private collectProperties(
-    rows: TimelineRow[],
-    dashboard: DashboardSettings,
-    files: TFile[]
-  ): string[] {
+  /** Every property the toolbar's pickers offer, from one walk of the scope. */
+  private collectProperties(dashboard: DashboardSettings, files: TFile[]): string[] {
+    const scopeKey = JSON.stringify(dashboard.scopeFilter);
+    const inScope = this.host.getDataCache().scan(`properties:${scopeKey}`, () => {
+      const keys = new Set<string>();
+      files.forEach((file) => {
+        const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+        if (frontmatter) Object.keys(frontmatter).forEach((key) => keys.add(key));
+      });
+      return Array.from(keys);
+    });
     const properties = new Set<string>([
       dashboard.trackedPropertyKey,
       dashboard.colorProperty,
       ...dashboard.rowProperties,
     ].filter(Boolean));
-    rows.forEach((row) => Object.keys(row.frontmatter).forEach((key) => properties.add(key)));
-    files.forEach((file) => {
-      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-      if (frontmatter) Object.keys(frontmatter).forEach((key) => properties.add(key));
-    });
+    inScope.forEach((key) => properties.add(key));
     return Array.from(properties).sort(compareText);
   }
 
@@ -403,39 +682,79 @@ export class DashboardTimeline {
     }
   }
 
-  private async addJournalNotesAfterInitialDraw(
+  /**
+   * Reads the marked lines of the periodic notes around the visible window and
+   * puts them on the timeline that is already drawn.
+   *
+   * The notes already on screen were drawn with the first pass, so this only
+   * has work to do when the read comes back with something different.
+   */
+  private async syncJournalNotes(
     token: number,
     dashboard: DashboardSettings,
     visible: PeriodRange,
-    rendered: RenderedTimelineData
+    hasTrackedItems: boolean
   ): Promise<void> {
     const notes = await this.collectJournalNotes(dashboard, visible);
     if (token !== this.renderToken || this.timeline === null) return;
-    if (notes.length === 0) {
+    const unchanged = journalSignature(notes) === journalSignature(this.journalNotes);
+    this.journalNotes = notes;
+    this.journalNotesKey = this.viewKey();
+
+    if (notes.length === 0 && !hasTrackedItems) {
       // A dashboard that has no tracked rows uses journal notes as its only
       // possible content. Replace the temporary empty timeline with the normal
       // guidance once that lookup completes.
-      if (rendered.items.length === 0) {
-        this.destroyTimeline();
-        this.containerEl.querySelector(".property-logs-timeline-wrapper")?.remove();
-        this.renderEmptyState(dashboard);
-      }
+      this.destroyTimeline();
+      this.containerEl.querySelector(".property-logs-timeline-wrapper")?.remove();
+      this.renderEmptyState(dashboard);
       return;
     }
+    if (unchanged) return;
 
-    this.addJournalItems(
-      rendered.items,
-      rendered.journalItems,
-      rendered.groups,
-      notes,
-      dashboard,
-      rendered.noteGroupIds
-    );
-    // setData retains the timeline instance and, crucially, the user's current
-    // pan/zoom position while vis-timeline incorporates the delayed notes.
-    this.timeline.setData({ items: rendered.items as any, groups: rendered.groups as any });
-    this.timeline.redraw();
+    const current = this.host.getDashboard(this.dashboardId) ?? dashboard;
+    const files = this.host.getDashboardFiles(current);
+    const model = this.buildModel(this.buildRows(current, files), current);
+    this.addJournalItems(model, notes, current);
+    if (!this.applyModel(model)) {
+      // The notes landed on groups this timeline cannot rearrange. Build again.
+      this.renderedLayoutKey = null;
+      void this.render();
+      return;
+    }
+    this.syncFloatingLabels();
+    this.syncSegmentLines();
     this.updateAxis();
+  }
+
+  /** Identifies what is on screen: the same dashboard, focused on the same period. */
+  private viewKey(): string {
+    const focus = this.focus
+      ? `${this.focus.granularity}:${this.focus.range.start.getTime()}`
+      : "";
+    return `${this.dashboardId}|${focus}`;
+  }
+
+  /**
+   * Remembers where the user had panned and zoomed to. A rebuild triggered by
+   * an edit elsewhere in the vault should leave the view exactly where they
+   * left it rather than snapping back to the default span.
+   */
+  private preserveWindow(): void {
+    if (!this.timeline || this.renderedKey === null) return;
+    const visible = this.timeline.getWindow();
+    const start = new Date(visible.start);
+    const end = new Date(visible.end);
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return;
+    if (end.getTime() <= start.getTime()) return;
+    this.preservedWindow = { key: this.renderedKey, start, end };
+  }
+
+  /** That window again, but only for a rebuild of the very same view. */
+  private restoredWindow(): PeriodRange | null {
+    const preserved = this.preservedWindow;
+    if (!preserved || preserved.key !== this.viewKey()) return null;
+    return { start: preserved.start, end: preserved.end };
   }
 
   private resolveWindow(): PeriodRange {
@@ -467,8 +786,9 @@ export class DashboardTimeline {
     const title = header.createEl("button", {
       cls: "property-logs-toolbar-title-button",
       text: dashboard.name,
-      attr: { type: "button", title: `Open ${dashboard.name}` },
+      attr: { type: "button" },
     });
+    applyTooltip(title, `Open ${dashboard.name}`);
     title.addEventListener("click", () => {
       if (this.options.onOpenFullDashboard) this.options.onOpenFullDashboard(dashboard.id);
       else void this.host.openDashboard(dashboard.id);
@@ -541,11 +861,9 @@ export class DashboardTimeline {
 
     const direction = toolbar.createEl("button", {
       cls: "clickable-icon property-logs-direction-button",
-      attr: {
-        "aria-label": dashboard.sortAscending ? "Sort descending" : "Sort ascending",
-        type: "button",
-      },
+      attr: { type: "button" },
     });
+    applyTooltip(direction, dashboard.sortAscending ? "Sort descending" : "Sort ascending");
     setIcon(direction, dashboard.sortAscending ? "arrow-up-narrow-wide" : "arrow-down-wide-narrow");
     direction.addEventListener("click", async () => {
       dashboard.sortAscending = !dashboard.sortAscending;
@@ -570,8 +888,9 @@ export class DashboardTimeline {
     });
     const today = controls.createEl("button", {
       cls: "property-logs-today-button",
-      attr: { type: "button", "aria-label": "Center today", title: "Center today" },
+      attr: { type: "button" },
     });
+    applyTooltip(today, "Center today");
     setIcon(today, "calendar-days");
     today.createSpan({ text: "Today" });
     today.addEventListener("click", () => this.centerOnFocus());
@@ -644,31 +963,37 @@ export class DashboardTimeline {
     cls?: string
   ): void {
     const button = this.createIconButton(parent, "panel-left-close", "Fold labels", () => {
-      dashboard.collapsedLabels = !dashboard.collapsedLabels;
-      this.applyLabelColumn(dashboard);
+      const current = this.host.getDashboard(this.dashboardId) ?? dashboard;
+      current.collapsedLabels = !current.collapsedLabels;
+      this.applyLabelColumn(current);
       void this.host.save();
     });
     if (cls) button.addClass(cls);
     this.labelFoldButtons.push(button);
-    this.applyLabelColumn(dashboard);
+    this.syncLabelColumn(dashboard);
   }
 
   /** Mirrors the folded state onto the container and every fold button on screen. */
-  private applyLabelColumn(dashboard: DashboardSettings): void {
+  private syncLabelColumn(dashboard: DashboardSettings): void {
     const collapsed = dashboard.collapsedLabels;
     this.containerEl.toggleClass("is-labels-collapsed", collapsed);
     const label = collapsed ? "Unfold labels" : "Fold labels";
     this.labelFoldButtons.forEach((button) => {
-      button.setAttribute("aria-label", label);
-      button.setAttribute("title", label);
+      applyTooltip(button, label);
       setIcon(button, collapsed ? "panel-left-open" : "panel-left-close");
     });
+  }
+
+  /** The same, for the gesture that actually changes the column's width. */
+  private applyLabelColumn(dashboard: DashboardSettings): void {
+    this.syncLabelColumn(dashboard);
     // vis-timeline sizes the left panel from its own content width, so the
     // collapsed labels only take effect once it re-measures them.
     window.requestAnimationFrame(() => {
       this.timeline?.redraw();
       this.updateAxis(true);
       this.syncFloatingLabels();
+      this.syncSegmentLines();
     });
   }
 
@@ -680,8 +1005,9 @@ export class DashboardTimeline {
   ): HTMLButtonElement {
     const button = parent.createEl("button", {
       cls: "clickable-icon",
-      attr: { type: "button", "aria-label": label, title: label },
+      attr: { type: "button" },
     });
+    applyTooltip(button, label);
     setIcon(button, icon);
     button.addEventListener("click", (event) => onClick(event));
     return button;
@@ -729,6 +1055,9 @@ export class DashboardTimeline {
   }
 
   private async toggleFold(dashboard: DashboardSettings, groupId: string): Promise<void> {
+    // Labels outlive a redraw now, so the dashboard one was built with may have
+    // been replaced by the settings tab since.
+    dashboard = this.host.getDashboard(this.dashboardId) ?? dashboard;
     dashboard.foldedGroups = this.isFolded(dashboard, groupId)
       ? dashboard.foldedGroups.filter((id) => id !== groupId)
       : [...dashboard.foldedGroups, groupId];
@@ -736,32 +1065,20 @@ export class DashboardTimeline {
     this.refresh();
   }
 
-  private renderTimeline(
-    rows: TimelineRow[],
-    dashboard: DashboardSettings,
-    visible: PeriodRange
-  ): RenderedTimelineData {
-    const wrapper = this.containerEl.createDiv({ cls: "property-logs-timeline-wrapper" });
-    // A headerless embed has no toolbar to hold the fold button, so it gets a
-    // small one tucked into the corner above the label column instead.
-    if (this.options.showToolbar === false) {
-      this.createLabelFoldButton(wrapper, dashboard, "property-logs-labels-corner-toggle");
-    }
-    const axisEl = wrapper.createDiv({ cls: "property-logs-axis" });
-    const timelineEl = wrapper.createDiv({ cls: "property-logs-timeline" });
-    const dividersEl = wrapper.createDiv({ cls: "property-logs-axis-dividers" });
-    this.timelineEl = timelineEl;
-    this.dividersEl = dividersEl;
-    axisEl.toggle(dashboard.showPeriodAxis);
-    dividersEl.toggle(dashboard.showPeriodAxis);
-
-    const items: TimelineItem[] = [];
-    const groups: TimelineGroup[] = [];
-    const itemRows = new Map<string, TimelineRow>();
-    this.groupLabelText.clear();
-    const journalItems = new Map<string, JournalNote>();
-    /** note path → the group that note occupies, for attaching linked journal notes. */
-    const noteGroupIds = new Map<string, string>();
+  /**
+   * Describes the whole dashboard without building any of it: which groups
+   * exist, which blocks sit in them, and what each is drawn from. Nothing here
+   * touches the DOM, so the result can be compared against what is on screen.
+   */
+  private buildModel(rows: TimelineRow[], dashboard: DashboardSettings): TimelineModel {
+    const model: TimelineModel = {
+      items: [],
+      groups: [],
+      itemRows: new Map(),
+      journalNotes: new Map(),
+      noteGroupIds: new Map(),
+      groupLabelText: new Map(),
+    };
     const sortedRows = [...rows].sort((first, second) => compareRows(first, second, dashboard));
 
     if (dashboard.groupBy === "status") {
@@ -792,22 +1109,35 @@ export class DashboardTimeline {
           const groupId = `status:${status}`;
           const foldable = bucket.notes.size > 1;
           const folded = foldable && this.isFolded(dashboard, groupId);
-          this.groupLabelText.set(groupId, status);
-          groups.push({
+          const noteCount = bucket.notes.size;
+          model.groupLabelText.set(groupId, status);
+          model.groups.push({
             id: groupId,
-            content: this.createGroupLabel(
+            props: {
+              id: groupId,
+              className: folded
+                ? "property-logs-status-group is-folded"
+                : "property-logs-status-group",
+              order,
+            },
+            contentKey: `status|${status}|${noteCount}|${foldable}|${folded}`,
+            createContent: () => this.createGroupLabel(
               dashboard,
               groupId,
-              this.createStatusLabel(status, bucket.notes.size),
+              this.createStatusLabel(status, noteCount),
               foldable
             ),
-            className: folded
-              ? "property-logs-status-group is-folded"
-              : "property-logs-status-group",
-            order,
           });
+          if (folded) {
+            const tallies = new Map<string, DayTally>();
+            bucket.segments.forEach(({ row, segment, segmentIndex }) => {
+              this.tallySegment(tallies, row, segment, segmentIndex);
+            });
+            this.planDayCounts(model, groupId, tallies);
+            return;
+          }
           bucket.segments.forEach(({ row, segment, segmentIndex }) => {
-            this.addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId, folded);
+            this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId);
           });
         });
     } else {
@@ -832,82 +1162,128 @@ export class DashboardTimeline {
           const folded = foldable && this.isFolded(dashboard, parentId);
 
           if (dashboard.groupBy !== "none") {
-            this.groupLabelText.set(parentId, bucket || "All notes");
-            const label = this.createGroupLabel(
-              dashboard,
-              parentId,
-              this.createBucketLabel(bucket, bucketRows.length),
-              foldable
-            );
-            groups.push({
+            const count = bucketRows.length;
+            model.groupLabelText.set(parentId, bucket || "All notes");
+            model.groups.push({
               id: parentId,
-              content: label,
-              nestedGroups: folded ? undefined : bucketRows.map((row) => `note:${row.file.path}`),
-              showNested: folded ? undefined : true,
-              className: folded
-                ? "property-logs-group-header is-folded"
-                : "property-logs-group-header",
-              order: order++,
+              props: {
+                id: parentId,
+                nestedGroups: folded ? undefined : bucketRows.map((row) => `note:${row.file.path}`),
+                showNested: folded ? undefined : true,
+                className: folded
+                  ? "property-logs-group-header is-folded"
+                  : "property-logs-group-header",
+                order: order++,
+              },
+              contentKey: `bucket|${bucket}|${count}|${foldable}|${folded}`,
+              createContent: () => this.createGroupLabel(
+                dashboard,
+                parentId,
+                this.createBucketLabel(bucket, count),
+                foldable
+              ),
             });
           }
 
           if (folded) {
+            const tallies = new Map<string, DayTally>();
             bucketRows.forEach((row) => {
-              noteGroupIds.set(row.file.path, parentId);
+              model.noteGroupIds.set(row.file.path, parentId);
               row.parsed.segments.forEach((segment, segmentIndex) => {
-                this.addSegmentItem(
-                  items, itemRows, row, dashboard, segment, segmentIndex, parentId, true
-                );
+                this.tallySegment(tallies, row, segment, segmentIndex);
               });
             });
+            this.planDayCounts(model, parentId, tallies);
             return;
           }
 
           bucketRows.forEach((row) => {
             const groupId = `note:${row.file.path}`;
-            noteGroupIds.set(row.file.path, groupId);
-            this.groupLabelText.set(groupId, row.file.basename);
-            groups.push({
+            model.noteGroupIds.set(row.file.path, groupId);
+            model.groupLabelText.set(groupId, row.file.basename);
+            model.groups.push({
               id: groupId,
-              content: this.createRowLabel(row, dashboard),
-              className: row.parsed.malformed ? "property-logs-row-malformed" : "property-logs-row",
-              order: order++,
+              props: {
+                id: groupId,
+                className: row.parsed.malformed
+                  ? "property-logs-row-malformed"
+                  : "property-logs-row",
+                order: order++,
+              },
+              contentKey: this.rowLabelKey(row, dashboard),
+              createContent: () => this.createRowLabel(row, dashboard),
             });
             row.parsed.segments.forEach((segment, segmentIndex) => {
-              this.addSegmentItem(
-                items, itemRows, row, dashboard, segment, segmentIndex, groupId, false
-              );
+              this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId);
             });
           });
         });
     }
 
+    return model;
+  }
+
+  /** Builds the vis-timeline instance the model will be fed into from now on. */
+  private mountTimeline(
+    model: TimelineModel,
+    dashboard: DashboardSettings,
+    visible: PeriodRange
+  ): void {
+    const wrapper = this.containerEl.createDiv({ cls: "property-logs-timeline-wrapper" });
+    // A headerless embed has no toolbar to hold the fold button, so it gets a
+    // small one tucked into the corner above the label column instead.
+    if (this.options.showToolbar === false) {
+      this.createLabelFoldButton(wrapper, dashboard, "property-logs-labels-corner-toggle");
+    }
+    const axisEl = wrapper.createDiv({ cls: "property-logs-axis" });
+    const timelineEl = wrapper.createDiv({ cls: "property-logs-timeline" });
+    const dividersEl = wrapper.createDiv({ cls: "property-logs-axis-dividers" });
+    this.timelineEl = timelineEl;
+    this.dividersEl = dividersEl;
+    axisEl.toggle(dashboard.showPeriodAxis);
+    dividersEl.toggle(dashboard.showPeriodAxis);
+
+    this.itemsData = new DataSet<TimelineItem>();
+    this.groupsData = new DataSet<TimelineGroup>();
+    this.appliedItems.clear();
+    this.appliedGroups.clear();
+    this.nestedSignature = "";
+    this.applyModel(model);
+
     const options = this.timelineOptions(visible, dashboard.showPeriodAxis);
     // vis-timeline supports HTMLElement content at runtime, although the standalone
     // constructor's collection alias narrows item content to strings.
-    this.timeline = new Timeline(timelineEl, items as any, groups as any, options);
+    this.timeline = new Timeline(
+      timelineEl,
+      this.itemsData as any,
+      this.groupsData as any,
+      options
+    );
     this.timeline.on("click", (properties: TimelineEventPropertiesResult) => {
       if (properties.item === null || properties.item === undefined) return;
       const id = String(properties.item);
-      const journalNote = journalItems.get(id);
+      const journalNote = this.journalNotesById.get(id);
       if (journalNote) {
         this.activateJournalNote(journalNote, properties.event);
         return;
       }
-      const row = itemRows.get(id);
+      const row = this.itemRows.get(id);
       if (row) this.activateTimelineBlock(row, dashboard, properties.event);
     });
     this.timeline.on("contextmenu", (properties: TimelineEventPropertiesResult) => {
       if (!this.isCtrlGesture(properties.event)) return;
       properties.event.preventDefault();
       if (properties.item === null || properties.item === undefined) return;
-      const row = itemRows.get(String(properties.item));
+      const row = this.itemRows.get(String(properties.item));
       if (row) this.activateTimelineBlock(row, dashboard, properties.event);
     });
 
     // Rows are rebuilt on any redraw, so the folded-column labels are restored
     // from the same signal that vis uses to announce it has finished one.
-    this.timeline.on("changed", () => this.syncFloatingLabels());
+    this.timeline.on("changed", () => {
+      this.syncFloatingLabels();
+      this.syncSegmentLines();
+    });
 
     if (dashboard.showPeriodAxis) {
       this.axis = new PeriodAxis(axisEl, dividersEl, {
@@ -934,10 +1310,84 @@ export class DashboardTimeline {
       this.timeline.setWindow(visible.start, visible.end, { animation: false });
       this.updateAxis();
       this.syncFloatingLabels();
+      this.syncSegmentLines();
+      // Blocks are positioned twice before they sit where they belong. Holding
+      // the wrapper back until then trades a visible jump for one short fade.
+      wrapper.addClass("is-ready");
     });
 
     this.observeResize(wrapper, initialTimeline);
-    return { items, groups, journalItems, noteGroupIds };
+    this.renderedKey = this.viewKey();
+    this.renderedLayoutKey = this.layoutKey(dashboard);
+  }
+
+  /**
+   * Hands the model to vis-timeline as the difference from what it already
+   * holds: rows and blocks that did not change keep the elements they have,
+   * and the timeline keeps its scroll, its zoom and its selection.
+   *
+   * Returns false — having changed nothing — when the model re-links groups to
+   * one another, which only a rebuild can carry out.
+   */
+  private applyModel(model: TimelineModel): boolean {
+    const itemsData = this.itemsData;
+    const groupsData = this.groupsData;
+    if (!itemsData || !groupsData) return false;
+
+    const nested = nestedGroupSignature(model.groups);
+    if (this.appliedGroups.size > 0 && nested !== this.nestedSignature) return false;
+
+    const groupAdds: TimelineGroup[] = [];
+    const groupUpdates: Partial<TimelineGroup>[] = [];
+    const nextGroups = new Map<string, AppliedEntry>();
+    model.groups.forEach((group) => {
+      const propsKey = planSignature(group.props as Record<string, unknown>);
+      const applied = this.appliedGroups.get(group.id);
+      if (!applied) {
+        groupAdds.push({ ...group.props, content: group.createContent() } as TimelineGroup);
+      } else if (applied.contentKey !== group.contentKey) {
+        groupUpdates.push({ ...group.props, content: group.createContent() } as TimelineGroup);
+      } else if (applied.propsKey !== propsKey) {
+        groupUpdates.push({ ...group.props } as Partial<TimelineGroup>);
+      }
+      nextGroups.set(group.id, { contentKey: group.contentKey, propsKey });
+    });
+
+    const itemAdds: TimelineItem[] = [];
+    const itemUpdates: Partial<TimelineItem>[] = [];
+    const nextItems = new Map<string, AppliedEntry>();
+    model.items.forEach((item) => {
+      const propsKey = planSignature(item.props as Record<string, unknown>);
+      const applied = this.appliedItems.get(item.id);
+      if (!applied) {
+        itemAdds.push({ ...item.props, content: item.createContent() } as TimelineItem);
+      } else if (applied.contentKey !== item.contentKey) {
+        itemUpdates.push({ ...item.props, content: item.createContent() } as TimelineItem);
+      } else if (applied.propsKey !== propsKey) {
+        itemUpdates.push({ ...item.props } as Partial<TimelineItem>);
+      }
+      nextItems.set(item.id, { contentKey: item.contentKey, propsKey });
+    });
+
+    const removedItems = Array.from(this.appliedItems.keys()).filter((id) => !nextItems.has(id));
+    const removedGroups = Array.from(this.appliedGroups.keys()).filter((id) => !nextGroups.has(id));
+
+    // Items go before the groups that held them, and groups before the items
+    // that arrive in them, so vis-timeline never sees a block without a row.
+    if (removedItems.length > 0) itemsData.remove(removedItems);
+    if (removedGroups.length > 0) groupsData.remove(removedGroups);
+    if (groupAdds.length > 0) groupsData.add(groupAdds);
+    if (groupUpdates.length > 0) groupsData.update(groupUpdates as TimelineGroup[]);
+    if (itemAdds.length > 0) itemsData.add(itemAdds);
+    if (itemUpdates.length > 0) itemsData.update(itemUpdates as TimelineItem[]);
+
+    this.appliedGroups = nextGroups;
+    this.appliedItems = nextItems;
+    this.nestedSignature = nested;
+    this.itemRows = model.itemRows;
+    this.journalNotesById = model.journalNotes;
+    this.groupLabelText = model.groupLabelText;
+    return true;
   }
 
   private timelineOptions(visible: PeriodRange, showAxis: boolean): TimelineOptions {
@@ -970,9 +1420,11 @@ export class DashboardTimeline {
       zoomable: Platform.isMobile && interactive,
       zoomMin: 1000 * 60 * 60 * 24 * 7,
       zoomMax: 1000 * 60 * 60 * 24 * 365 * 20,
+      // Rows sit tight under the axis and stacked lines sit tight on each
+      // other: the folded rows are read as a list, and a list has no gaps.
       margin: {
-        item: { horizontal: 0, vertical: minimal ? 1 : compact ? 1 : 2 },
-        axis: minimal ? 2 : compact ? 3 : 5,
+        item: { horizontal: 0, vertical: 1 },
+        axis: minimal ? 1 : 2,
       },
       groupOrder: (first, second) => (first.order ?? 0) - (second.order ?? 0),
       start: visible.start,
@@ -1021,6 +1473,51 @@ export class DashboardTimeline {
       });
   }
 
+  /**
+   * Lays the line and arrow of every note out around its name.
+   *
+   * The name sits inside vis-timeline's content element, which vis slides
+   * sideways to keep it on screen when the range starts off the left edge, so
+   * the line has to begin wherever the name currently ends and reach the
+   * range's own end — or, for a name longer than its range, sit flush behind
+   * it with the arrow directly after the text. Both edges are pushed onto the
+   * item as custom properties, where the CSS draws from them.
+   */
+  private syncSegmentLines(): void {
+    if (!this.timelineEl) return;
+    const items = this.timelineEl.querySelectorAll<HTMLElement>(
+      ".vis-foreground .vis-item.property-logs-segment"
+    );
+    if (items.length === 0) return;
+    const measured: Array<{ item: HTMLElement; start: number; end: number }> = [];
+    // Read everything first, then write: interleaving the two makes the
+    // browser lay the row out again for every single item.
+    items.forEach((item) => {
+      const content = item.querySelector<HTMLElement>(":scope > .vis-item-overflow > .vis-item-content");
+      const label = content?.querySelector<HTMLElement>(".property-logs-segment-button");
+      if (!content || !label) return;
+      const width = parseFloat(item.style.width) || 0;
+      const shift = /translateX\((-?[\d.]+)px\)/.exec(content.style.transform);
+      const offset = shift ? parseFloat(shift[1]) : 0;
+      let labelWidth = this.segmentLabelWidths.get(label);
+      if (labelWidth === undefined) {
+        labelWidth = label.offsetWidth;
+        // A name that has not been laid out yet measures zero; try it again
+        // on the next redraw rather than remembering that.
+        if (labelWidth > 0) this.segmentLabelWidths.set(label, labelWidth);
+      }
+      const start = offset + labelWidth + SEGMENT_LINE_GAP;
+      measured.push({ item, start, end: Math.max(width, start) });
+    });
+    measured.forEach(({ item, start, end }) => {
+      const key = `${Math.round(start)}:${Math.round(end)}`;
+      if (item.dataset.segmentLine === key) return;
+      item.dataset.segmentLine = key;
+      item.style.setProperty("--property-logs-line-start", `${start}px`);
+      item.style.setProperty("--property-logs-line-end", `${end}px`);
+    });
+  }
+
   private updateAxis(immediate = false): void {
     if (!this.timeline || !this.axis || !this.timelineEl) return;
     const leftPanel = this.timelineEl.querySelector<HTMLElement>(".vis-panel.vis-left");
@@ -1037,89 +1534,252 @@ export class DashboardTimeline {
     );
   }
 
-  private addSegmentItem(
-    items: TimelineItem[],
-    itemRows: Map<string, TimelineRow>,
+  /**
+   * Adds one note's segment to a folded row's day counts, once per day it
+   * covers. A note that holds a value across a week is one note on each of
+   * those days, not seven.
+   */
+  private tallySegment(
+    tallies: Map<string, DayTally>,
+    row: TimelineRow,
+    segment: TimelineSegment,
+    segmentIndex: number
+  ): void {
+    const label = segment.value ? `${row.file.basename} — ${segment.value}` : row.file.basename;
+    segmentDays(segment, isOngoingSegment(row, segmentIndex)).forEach((day) => {
+      this.tallyDay(tallies, day, row.file.path, label);
+    });
+  }
+
+  private tallyDay(
+    tallies: Map<string, DayTally>,
+    day: string,
+    key: string,
+    label: string
+  ): void {
+    const tally = tallies.get(day) ?? { notes: [], counted: new Set<string>() };
+    if (!tally.counted.has(key)) {
+      tally.counted.add(key);
+      tally.notes.push(label);
+    }
+    tallies.set(day, tally);
+  }
+
+  /**
+   * Draws a folded row as a single line of days: one number per day saying how
+   * many notes sit there, and a hint naming them. The notes themselves are
+   * left out — collapsing the row to one line is what folding it now means.
+   *
+   * Every count shares one subgroup, which is what holds them to that line:
+   * vis-timeline stacks items within a group, but leaves a subgroup flat
+   * unless it is asked to stack, so days that crowd together at a wide zoom
+   * overlap instead of growing the row.
+   */
+  private planDayCounts(
+    model: TimelineModel,
+    groupId: string,
+    tallies: Map<string, DayTally>
+  ): void {
+    tallies.forEach((tally, day) => {
+      const id = `${groupId}\u0000count:${day}`;
+      model.items.push({
+        id,
+        props: {
+          id,
+          group: groupId,
+          subgroup: DAY_COUNT_SUBGROUP,
+          start: middayOf(day),
+          type: "point",
+          selectable: false,
+          editable: false,
+          className: "property-logs-day-count",
+        },
+        contentKey: `count|${day}|${tally.notes.join("\u0001")}`,
+        createContent: () => this.createDayCountContent(day, tally.notes),
+      });
+    });
+  }
+
+  /** The number itself, with the day's notes behind it on hover. */
+  private createDayCountContent(day: string, notes: string[]): HTMLElement {
+    const badge = document.createElement("div");
+    badge.className = "property-logs-day-count-badge";
+    badge.setText(String(notes.length));
+    const named = notes.slice(0, DAY_COUNT_TOOLTIP_LIMIT);
+    const remaining = notes.length - named.length;
+    if (remaining > 0) named.push(`…and ${remaining} more`);
+    applyTooltip(badge, [
+      `${day} · ${notes.length} ${notes.length === 1 ? "note" : "notes"}`,
+      ...named,
+    ].join("\n"));
+    return badge;
+  }
+
+  private planSegmentItem(
+    model: TimelineModel,
     row: TimelineRow,
     dashboard: DashboardSettings,
     segment: TimelineSegment,
     segmentIndex: number,
-    groupId: string,
-    folded: boolean
+    groupId: string
   ): void {
     const id = `${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`;
-    const isCurrent = segmentIndex === row.parsed.segments.length - 1;
+    const isCurrent = isOngoingSegment(row, segmentIndex);
     const startedToday = localDate(segment.start) === localDate(new Date());
     const end = segment.end.getTime() > segment.start.getTime()
       ? segment.end
       : addDays(segment.start, isCurrent && startedToday ? CURRENT_TODAY_OVERFLOW_DAYS : 1);
-    const item: TimelineItem = {
+    // Every note reads as its name and a line, ending in an arrow while the
+    // value is still the note's current one. Names that would collide stack,
+    // so a row grows only as far as its notes need.
+    const className = `property-logs-segment${isCurrent ? " is-ongoing" : ""}`;
+    model.items.push({
       id,
-      group: groupId,
-      start: segment.start,
-      end,
-      type: "range",
-      align: "auto",
-      content: this.createSegmentContent(row, dashboard, segment, folded),
-      selectable: false,
-      editable: false,
-      className: folded ? "property-logs-segment is-folded" : "property-logs-segment",
-      style: timelineColorStyle(segment.color),
-    };
-    // A shared subgroup keeps every note of a folded group on one line.
-    if (folded) (item as TimelineItem & { subgroup?: string }).subgroup = `${groupId}:folded`;
-    items.push(item);
-    itemRows.set(id, row);
+      props: {
+        id,
+        group: groupId,
+        start: segment.start,
+        end,
+        type: "range",
+        align: "auto",
+        selectable: false,
+        editable: false,
+        className,
+        style: timelineColorStyle(segment.color),
+      },
+      // The block's own text comes from the note, its properties and the dates
+      // of this segment; the note's mtime stands in for the first two.
+      contentKey: [
+        row.file.stat.mtime,
+        row.file.basename,
+        segment.value ?? "",
+        localDate(segment.start),
+        localDate(segment.end),
+        dashboard.rowProperties.join(","),
+        dashboard.noteOpenGesture,
+      ].join("|"),
+      createContent: () => this.createSegmentContent(row, dashboard, segment),
+    });
+    model.itemRows.set(id, row);
+  }
+
+  /** What a note's row label is drawn from, for spotting the ones that moved. */
+  private rowLabelKey(row: TimelineRow, dashboard: DashboardSettings): string {
+    return [
+      "note",
+      row.file.stat.mtime,
+      row.file.basename,
+      dashboard.rowProperties.join(","),
+      row.parsed.issues.length,
+    ].join("|");
   }
 
   private addJournalItems(
-    items: TimelineItem[],
-    journalItems: Map<string, JournalNote>,
-    groups: TimelineGroup[],
+    model: TimelineModel,
     notes: JournalNote[],
-    dashboard: DashboardSettings,
-    noteGroupIds: Map<string, string>
+    dashboard: DashboardSettings
   ): void {
     if (notes.length === 0) return;
     const markers = this.host.getJournalMarkers();
     const laneId = "journal:lane";
-    let laneUsed = false;
+    const laneFolded = this.isFolded(dashboard, laneId);
+    const laneTallies = new Map<string, DayTally>();
+    let laneCount = 0;
 
     notes.forEach((note) => {
       const style = markerStyle(markers, note.marker);
-      const targetGroup = this.resolveJournalGroup(note, noteGroupIds);
-      const groupId = targetGroup ?? laneId;
-      if (!targetGroup) laneUsed = true;
-      const folded = this.isFolded(dashboard, groupId);
-      const item: TimelineItem = {
+      const targetGroup = this.resolveJournalGroup(note, model.noteGroupIds);
+      // A folded row is one line of counts with no room for pills, so a note
+      // that would land in one goes back to the shared lane instead.
+      const groupId = targetGroup && !this.isFolded(dashboard, targetGroup)
+        ? targetGroup
+        : laneId;
+      if (groupId === laneId) {
+        laneCount++;
+        // A folded lane draws its notes as a count in each day's own column
+        // rather than as pills along the row.
+        if (laneFolded) {
+          this.tallyDay(
+            laneTallies,
+            localDate(centerOf(note.range)),
+            note.id,
+            plainNoteText(note.text)
+          );
+          return;
+        }
+      }
+      model.items.push({
         id: note.id,
-        group: groupId,
-        start: centerOf(note.range),
-        type: "point",
-        content: this.createJournalContent(note, style),
-        selectable: false,
-        editable: false,
-        className: "property-logs-journal-note",
-        style: timelineColorStyle(style.color),
-      };
-      if (folded) (item as TimelineItem & { subgroup?: string }).subgroup = `${groupId}:folded`;
-      items.push(item);
-      journalItems.set(note.id, note);
+        props: {
+          id: note.id,
+          group: groupId,
+          start: centerOf(note.range),
+          type: "point",
+          selectable: false,
+          editable: false,
+          className: "property-logs-journal-note",
+          style: timelineColorStyle(style.color),
+        },
+        contentKey: [
+          "journal",
+          note.marker,
+          note.text,
+          note.file.basename,
+          localDate(note.range.start),
+          style.icon,
+          style.label,
+        ].join("|"),
+        createContent: () => this.createJournalContent(note, style),
+      });
+      model.journalNotes.set(note.id, note);
     });
 
-    if (laneUsed) {
-      const label = document.createElement("div");
-      label.className = "property-logs-journal-lane-label";
-      const icon = label.createSpan({ cls: "property-logs-journal-lane-icon" });
-      setIcon(icon, "sticky-note");
-      label.createSpan({ text: "Journal notes" });
-      groups.unshift({
+    if (laneCount > 0) {
+      this.planDayCounts(model, laneId, laneTallies);
+      model.groupLabelText.set(laneId, `Journal notes · ${laneCount}`);
+      model.groups.unshift({
         id: laneId,
-        content: label,
-        className: "property-logs-journal-lane",
-        order: -1,
-      } as TimelineGroup);
+        props: {
+          id: laneId,
+          className: laneFolded
+            ? "property-logs-journal-lane is-folded"
+            : "property-logs-journal-lane",
+          order: -1,
+        } as Omit<TimelineGroup, "content">,
+        contentKey: `journal-lane|${laneCount}|${laneFolded}`,
+        createContent: () => this.createGroupLabel(
+          dashboard,
+          laneId,
+          this.createJournalLaneLabel(laneCount, laneFolded),
+          true
+        ),
+      });
     }
+  }
+
+  /**
+   * The lane's own label: a marker icon and its name. Unfolded it also carries
+   * how many notes it holds; folded, that number has moved out into the
+   * calendar, where it is broken down by day.
+   */
+  private createJournalLaneLabel(count: number, folded: boolean): HTMLElement {
+    const label = document.createElement("div");
+    label.className = folded
+      ? "property-logs-journal-lane-label is-folded"
+      : "property-logs-journal-lane-label";
+    const icon = label.createSpan({ cls: "property-logs-journal-lane-icon" });
+    setIcon(icon, "sticky-note");
+    label.createSpan({ text: "Journal notes", cls: "property-logs-journal-lane-name" });
+    if (!folded) label.createSpan({ text: String(count), cls: "property-logs-status-count" });
+    const plural = count === 1 ? "note" : "notes";
+    applyTooltip(
+      label,
+      folded
+        ? `${count} journal ${plural}, counted by day — unfold to read them`
+        : `${count} journal ${plural}`,
+      "right"
+    );
+    return label;
   }
 
   private resolveJournalGroup(
@@ -1141,8 +1801,10 @@ export class DashboardTimeline {
     content.className = "property-logs-journal-button";
     content.setAttribute("data-task", note.marker);
     const text = plainNoteText(note.text);
-    content.title = `${style.label} · ${localDate(note.range.start)}\n${text}`;
-    content.setAttribute("aria-label", `${style.label}: ${text}`);
+    applyTooltip(
+      content,
+      `${style.label} · ${localDate(note.range.start)}\n${text}\n${note.file.basename}`
+    );
     const icon = content.createSpan({ cls: "property-logs-journal-icon" });
     setIcon(icon, style.icon);
     content.createSpan({ text, cls: "property-logs-journal-text" });
@@ -1183,19 +1845,18 @@ export class DashboardTimeline {
     const label = document.createElement("div");
     label.className = "property-logs-status-label";
     label.createSpan({ text: status, cls: "property-logs-status-name" });
-    label.createSpan({
-      text: String(noteCount),
-      cls: "property-logs-status-count",
-      attr: { "aria-label": `${noteCount} ${noteCount === 1 ? "note" : "notes"}` },
-    });
+    label.createSpan({ text: String(noteCount), cls: "property-logs-status-count" });
+    applyTooltip(label, `${status} · ${noteCount} ${noteCount === 1 ? "note" : "notes"}`, "right");
     return label;
   }
 
   private createBucketLabel(bucket: string, noteCount: number): HTMLElement {
     const label = document.createElement("div");
     label.className = "property-logs-status-label";
-    label.createSpan({ text: bucket || "All notes", cls: "property-logs-status-name" });
+    const name = bucket || "All notes";
+    label.createSpan({ text: name, cls: "property-logs-status-name" });
     label.createSpan({ text: String(noteCount), cls: "property-logs-status-count" });
+    applyTooltip(label, `${name} · ${noteCount} ${noteCount === 1 ? "note" : "notes"}`, "right");
     return label;
   }
 
@@ -1223,13 +1884,9 @@ export class DashboardTimeline {
     wrapper.dataset.foldableGroup = groupId;
     const toggle = wrapper.createEl("button", {
       cls: "property-logs-fold-toggle",
-      attr: {
-        type: "button",
-        "aria-expanded": String(!folded),
-        "aria-label": folded ? "Unfold rows" : "Fold rows",
-        title: folded ? "Unfold rows" : "Fold into one row",
-      },
+      attr: { type: "button", "aria-expanded": String(!folded) },
     });
+    applyTooltip(toggle, folded ? "Unfold rows" : "Fold into one row");
     setIcon(toggle, folded ? "chevron-right" : "chevron-down");
     toggle.addEventListener("click", (event) => {
       event.preventDefault();
@@ -1243,33 +1900,34 @@ export class DashboardTimeline {
   private createSegmentContent(
     row: TimelineRow,
     dashboard: DashboardSettings,
-    segment: TimelineSegment,
-    folded: boolean
+    segment: TimelineSegment
   ): HTMLElement {
     const content = document.createElement("button");
     content.type = "button";
-    content.className = folded
-      ? "property-logs-segment-button is-folded"
-      : "property-logs-segment-button";
+    content.className = "property-logs-segment-button";
     const primaryAction = dashboard.noteOpenGesture === "click"
       ? "Click to open note; Ctrl-click to change value."
       : "Click to change value; Ctrl-click to open note.";
-    content.title = `${row.file.basename} — ${segment.value ?? "Unset"} — ${localDate(segment.start)} to ${localDate(segment.end)}. ${primaryAction}`;
-    content.setAttribute(
-      "aria-label",
-      `${row.file.basename}: ${segment.value ?? "unset"}, level ${segment.level}. ${primaryAction}`
-    );
     content.createSpan({ text: row.file.basename, cls: "property-logs-segment-title" });
-    if (!folded) {
-      dashboard.rowProperties.forEach((key) => {
-        const value = displayPropertyValue(
-          Object.prototype.hasOwnProperty.call(row.frontmatter, key)
-            ? row.frontmatter[key]
-            : latestHistoryValue(row.history, key, this.host.getDashboardDateKey())
-        );
-        if (value) content.createSpan({ text: value, cls: "property-logs-segment-meta" });
-      });
-    }
+    // Properties stay in the markup rather than being dropped: the small name
+    // hides them until it is hovered, and then grows to show them.
+    const meta: string[] = [];
+    dashboard.rowProperties.forEach((key) => {
+      const value = displayPropertyValue(
+        Object.prototype.hasOwnProperty.call(row.frontmatter, key)
+          ? row.frontmatter[key]
+          : latestHistoryValue(row.history, key, this.host.getDashboardDateKey())
+      );
+      if (!value) return;
+      meta.push(`${key}: ${value}`);
+      content.createSpan({ text: value, cls: "property-logs-segment-meta" });
+    });
+    applyTooltip(content, [
+      row.file.basename,
+      `${segment.value ?? "Unset"} · ${localDate(segment.start)} → ${localDate(segment.end)}`,
+      ...meta,
+      primaryAction,
+    ].join("\n"));
     content.addEventListener("click", (event) => {
       event.stopPropagation();
       this.activateTimelineBlock(row, dashboard, event);
@@ -1294,6 +1952,9 @@ export class DashboardTimeline {
     dashboard: DashboardSettings,
     event: Event
   ): void {
+    // A block that survived several redraws still carries the dashboard it was
+    // built with, which the settings tab may since have replaced.
+    dashboard = this.host.getDashboard(this.dashboardId) ?? dashboard;
     const gesture = this.isCtrlGesture(event) ? "ctrl-click" : "click";
     const opensNote = dashboard.noteOpenGesture === gesture;
     const activationKey = `${row.file.path}:${opensNote ? "open" : "edit"}`;
@@ -1319,6 +1980,7 @@ export class DashboardTimeline {
       cls: "property-logs-row-title",
       attr: { type: "button" },
     });
+    applyTooltip(title, `${row.file.basename}\nClick to open the note.`, "right");
     title.addEventListener("click", () => void this.app.workspace.getLeaf(false).openFile(row.file));
 
     const metadata = label.createDiv({ cls: "property-logs-row-metadata" });
@@ -1333,8 +1995,7 @@ export class DashboardTimeline {
     });
     if (row.parsed.issues.length > 0) {
       const warning = label.createSpan({ cls: "property-logs-row-warning" });
-      warning.setAttribute("aria-label", "Timeline data warning");
-      warning.setAttribute("title", row.parsed.issues.map((issue) => issue.message).join("\n"));
+      applyTooltip(warning, row.parsed.issues.map((issue) => issue.message).join("\n"));
       setIcon(warning, "triangle-alert");
     }
     return label;

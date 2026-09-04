@@ -6,6 +6,7 @@ import {
   DashboardSettings,
 } from "../data/dashboard";
 import { GlobalValueStyles, knownValues } from "../data/valueStyles";
+import { applyTooltip } from "../view/tooltips";
 import type { TimelineLevel } from "../data/historyParser";
 import {
   COLOR_PALETTE,
@@ -67,10 +68,10 @@ export function addPalettePicker(
       attr: {
         type: "button",
         role: "radio",
-        title: choice.label,
         "aria-label": choice.label,
       },
     });
+    applyTooltip(button, choice.label);
     button.dataset.value = choice.value;
     button.style.setProperty(
       "--property-logs-swatch-color",

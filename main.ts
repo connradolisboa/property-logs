@@ -1,11 +1,13 @@
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TextAreaComponent, TextComponent, TFile, moment, normalizePath } from "obsidian";
 
 import {
+  DashboardFileData,
   DashboardSettings,
   duplicateDashboardSettings,
   isFileInDashboardScope,
   normalizeDashboardSettings,
 } from "./data/dashboard";
+import { DashboardDataCache } from "./data/dashboardCache";
 import { collectCompatibleHistory, historyContainsKey } from "./data/historyCompatibility";
 import {
   DEFAULT_JOURNAL_MARKERS,
@@ -90,6 +92,11 @@ interface PluginData {
 
 const currentYear = new Date().getFullYear();
 
+/** How long one burst of vault events is allowed to settle before a rebuild. */
+const REFRESH_DEBOUNCE_MS = 120;
+/** How quiet the editor has to be before a rebuild is allowed to interrupt. */
+const TYPING_IDLE_MS = 700;
+
 const DEFAULT_SETTINGS: PluginSettings = {
   includedFolders: [],
   includedTags: [],
@@ -127,8 +134,18 @@ export default class PropertyLogsPlugin extends Plugin {
   private previousPropertyValues: Map<string, Record<string, string>> = new Map();
   private periodicNotes!: PeriodicNotes;
   private journalNoteIndex!: JournalNoteIndex;
+  /** Vault scans and parsed histories, shared by every dashboard on screen. */
+  private readonly dataCache = new DashboardDataCache();
+  /** The periodic configuration the resolved contexts were cached under. */
+  private periodicConfigSignature = "";
   private readonly embeds = new Set<DashboardEmbed>();
   private dashboardRefreshTimer: number | null = null;
+  /** Per file, a signature of the frontmatter a dashboard actually draws from. */
+  private readonly dashboardSignatures = new Map<string, string>();
+  /** When the editor last reported a keystroke, so rebuilds wait for a pause. */
+  private lastEditorChangeAt = 0;
+  /** The note that keystroke landed in: only its own rebuild has to wait. */
+  private lastEditorChangePath = "";
   settings: PluginSettings = { ...DEFAULT_SETTINGS };
 
   async onload() {
@@ -231,26 +248,43 @@ export default class PropertyLogsPlugin extends Plugin {
     });
 
     this.registerEvent(
-      this.app.metadataCache.on("changed", (file: TFile) => {
-        void this.handleMetadataChange(file);
-        this.journalNoteIndex.invalidate(file.path);
-        this.refreshDashboardViews();
+      this.app.workspace.on("editor-change", (_editor, info) => {
+        this.lastEditorChangeAt = Date.now();
+        this.lastEditorChangePath = info.file?.path ?? "";
       })
     );
 
-    this.registerEvent(this.app.vault.on("create", () => this.refreshDashboardViews()));
+    this.registerEvent(
+      this.app.metadataCache.on("changed", (file: TFile) => {
+        void this.handleMetadataChange(file);
+        this.handleFileTouched(file);
+      })
+    );
+
+    this.registerEvent(this.app.vault.on("create", () => {
+      this.dataCache.invalidateAll();
+      this.journalNoteIndex.invalidate();
+      this.refreshDashboardViews();
+    }));
     this.registerEvent(this.app.vault.on("delete", (file) => {
       this.journalNoteIndex.invalidate(file.path);
+      this.periodicNotes.invalidate(file.path);
+      this.dataCache.invalidateFile(file.path);
+      this.dashboardSignatures.delete(file.path);
       this.refreshDashboardViews();
     }));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       this.journalNoteIndex.invalidate(oldPath);
       this.journalNoteIndex.invalidate(file.path);
+      this.periodicNotes.invalidate(oldPath);
+      this.periodicNotes.invalidate(file.path);
+      this.dataCache.invalidateAll();
+      this.dashboardSignatures.delete(oldPath);
+      this.dashboardSignatures.delete(file.path);
       this.refreshDashboardViews();
     }));
     this.registerEvent(this.app.vault.on("modify", (file) => {
-      this.journalNoteIndex.invalidate(file.path);
-      this.refreshDashboardViews();
+      if (file instanceof TFile) this.handleFileTouched(file);
     }));
   }
 
@@ -277,7 +311,20 @@ export default class PropertyLogsPlugin extends Plugin {
   }
 
   getDashboardFiles(dashboard: DashboardSettings): TFile[] {
-    return this.app.vault.getMarkdownFiles().filter((file) => {
+    const scopeKey = JSON.stringify(dashboard.scopeFilter);
+    const files = this.dataCache.scan(`scope:${scopeKey}`, () =>
+      this.app.vault.getMarkdownFiles().filter((file) =>
+        isFileInDashboardScope(this.scopeDataFor(file), dashboard.scopeFilter)
+      )
+    );
+    // The cached list is shared by every dashboard reading the same scope, so
+    // callers get their own copy to sort and filter.
+    return [...files];
+  }
+
+  /** One note's tags and frontmatter, flattened the way a scope reads them. */
+  private scopeDataFor(file: TFile): DashboardFileData {
+    return this.dataCache.forFile("scope-data", file, "", () => {
       const cache = this.app.metadataCache.getFileCache(file);
       const tags = new Set<string>();
       const frontmatterTags = cache?.frontmatter?.tags;
@@ -287,12 +334,16 @@ export default class PropertyLogsPlugin extends Plugin {
         tags.add(String(frontmatterTags).replace(/^#/, ""));
       }
       cache?.tags?.forEach((tag) => tags.add(tag.tag.replace(/^#/, "")));
-      return isFileInDashboardScope({
+      return {
         path: file.path,
         tags,
         frontmatter: cache?.frontmatter as Record<string, unknown> | undefined,
-      }, dashboard.scopeFilter);
+      };
     });
+  }
+
+  getDataCache(): DashboardDataCache {
+    return this.dataCache;
   }
 
   noteHasTrackedHistory(file: TFile, dashboard: DashboardSettings): boolean {
@@ -368,14 +419,82 @@ export default class PropertyLogsPlugin extends Plugin {
     await this.app.workspace.revealLeaf(leaf);
   }
 
-  refreshDashboardViews(): void {
-    // A frontmatter edit normally produces several vault/cache events. Let that
-    // short burst settle before asking every open dashboard to rebuild.
+  /**
+   * Rebuilds every open dashboard once the events behind the change settle.
+   *
+   * `waitForFile` names the note the change came out of. While that same note
+   * is still being typed in, the rebuild waits for a pause: a dashboard that
+   * redraws under the cursor is the one thing guaranteed to interrupt the
+   * writing. Every other trigger — a value picked, a setting changed, a note
+   * created — is a deliberate action and redraws straight away.
+   */
+  refreshDashboardViews(waitForFile?: string): void {
     if (this.dashboardRefreshTimer !== null) window.clearTimeout(this.dashboardRefreshTimer);
+    const typingHere = waitForFile !== undefined
+      && waitForFile === this.lastEditorChangePath
+      && Date.now() - this.lastEditorChangeAt < TYPING_IDLE_MS;
+    const delay = typingHere
+      ? TYPING_IDLE_MS - (Date.now() - this.lastEditorChangeAt) + REFRESH_DEBOUNCE_MS
+      : REFRESH_DEBOUNCE_MS;
     this.dashboardRefreshTimer = window.setTimeout(() => {
       this.dashboardRefreshTimer = null;
+      const stillTyping = waitForFile !== undefined
+        && waitForFile === this.lastEditorChangePath
+        && Date.now() - this.lastEditorChangeAt < TYPING_IDLE_MS;
+      if (stillTyping) {
+        this.refreshDashboardViews(waitForFile);
+        return;
+      }
       this.refreshDashboardViewsNow();
-    }, 80);
+    }, delay);
+  }
+
+  /** True while a dashboard is on screen and worth keeping up to date. */
+  private hasVisibleDashboards(): boolean {
+    return this.embeds.size > 0
+      || this.app.workspace.getLeavesOfType(TIMELINE_VIEW_TYPE).length > 0;
+  }
+
+  /** The frontmatter a dashboard draws from, flattened for comparison. */
+  private dashboardSignature(file: TFile): string {
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (!frontmatter) return "";
+    try {
+      return JSON.stringify(frontmatter);
+    } catch {
+      return String(file.stat.mtime);
+    }
+  }
+
+  /**
+   * Decides whether one edited note is worth a rebuild.
+   *
+   * Obsidian saves a note while it is still being typed in, so this fires
+   * through a sentence. A rebuild is only earned when the note's frontmatter
+   * or one of its marked journal lines actually reads differently than it did
+   * the last time a dashboard looked; ordinary prose leaves the timeline alone.
+   */
+  private handleFileTouched(file: TFile): void {
+    if (file.extension !== "md") return;
+    // Whatever the edit turns out to be worth, this note's cached scan data,
+    // parsed history and resolved period no longer describe what is on disk.
+    this.dataCache.invalidateFile(file.path);
+    this.periodicNotes.invalidate(file.path);
+    if (!this.hasVisibleDashboards()) {
+      this.journalNoteIndex.invalidate(file.path);
+      this.dashboardSignatures.delete(file.path);
+      return;
+    }
+    const signature = this.dashboardSignature(file);
+    if (this.dashboardSignatures.get(file.path) !== signature) {
+      this.dashboardSignatures.set(file.path, signature);
+      this.journalNoteIndex.invalidate(file.path);
+      this.refreshDashboardViews(file.path);
+      return;
+    }
+    void this.journalNoteIndex.syncFile(file).then((changed) => {
+      if (changed) this.refreshDashboardViews(file.path);
+    });
   }
 
   private refreshDashboardViewsNow(): void {
@@ -456,6 +575,19 @@ export default class PropertyLogsPlugin extends Plugin {
     return this.periodicNotes.hasJournals();
   }
 
+  /**
+   * Drops the resolved periodic contexts when the configuration they were
+   * resolved under changes. Every other setting is already part of the cache
+   * keys, so an ordinary save leaves the parsed vault data alone.
+   */
+  private syncPeriodicConfig(): void {
+    if (!this.periodicNotes) return;
+    const signature = JSON.stringify(this.periodicNotesConfig());
+    if (signature === this.periodicConfigSignature) return;
+    this.periodicConfigSignature = signature;
+    this.periodicNotes.invalidate();
+  }
+
   private periodicNotesConfig(): PeriodicNotesConfig {
     return {
       dailyFolder: this.settings.dailyNoteLog.folder,
@@ -514,6 +646,7 @@ export default class PropertyLogsPlugin extends Plugin {
   }
 
   async save() {
+    this.syncPeriodicConfig();
     await this.saveData({
       previousStatuses: Object.fromEntries(this.previousStatuses),
       previousPropertyValues: Object.fromEntries(this.previousPropertyValues),

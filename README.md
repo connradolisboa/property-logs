@@ -14,7 +14,7 @@ An [Obsidian](https://obsidian.md) plugin that automatically logs property chang
 - **Embedded dashboards** — Drop a dashboard into any note with a `property-logs` code block; inside a periodic note it centers on that note's date and zooms to match the note type
 - **Periodic-note integration** — Clickable day, week, month, quarter, and year cells open the matching note through [Journals](https://github.com/srg-kostyrko/obsidian-journals), with week numbers and dividers on the axis
 - **Notes from your journal** — Marked task lines such as `- [n] Felt good about this` appear on the timeline for that note's date, with a per-marker icon and color
-- **Foldable rows** — Collapse a status or group row into a single minimal lane of note titles
+- **Foldable rows** — Collapse a status or group row into a single line carrying one count per day
 - **Global value styles** — Set a level and color once per property value; any dashboard can override them
 - **Customizable keys** — Rename the history key and property names to match your vault's naming conventions
 - **Multiple tracked properties** — Go beyond status—track deadline changes, priority updates, assignees, or any other property
@@ -224,7 +224,7 @@ Create one or more saved timeline dashboards. Each dashboard has independent con
 | **Row properties** | Current frontmatter values or latest history-entry values displayed beside each note title. |
 | **Group and sort defaults** | Starts with folder, level, alphabetical, recently changed, or any selected frontmatter property. |
 
-Clicking a timeline bar opens a value picker. Choosing a mapped value or entering free text updates both the note's live property and its existing history array. Choosing a value mapped to level 0 hides the new segment without deleting history.
+Clicking a note on the timeline opens a value picker. Choosing a mapped value or entering free text updates both the note's live property and its existing history array. Choosing a value mapped to level 0 hides the new segment without deleting history.
 
 ## Commands
 
@@ -239,7 +239,7 @@ From the dashboard you can:
 - Group and sort rows without leaving the view
 - Switch between level and property coloring
 - Open a note from its row label
-- Click a bar to update the tracked value
+- Click a note to update the tracked value
 - Add an eligible existing note or create a new note and set its initial value
 
 The timeline uses the bundled `vis-timeline` renderer; no companion plugin is required.
@@ -299,6 +299,8 @@ In a periodic note the embed centers on that note's date and zooms to match its 
 
 Because the embed reads the period from the note the block is rendered for, it also works with [Virtual Content](https://github.com/Signynt/virtual-footer): put the code block in a Virtual Content rule for your daily notes and every daily note gets a dashboard centered on its own date without touching the files.
 
+An embed holds the space it will take and builds itself as you scroll near it, so a note carrying several of them opens at once and nothing shifts underneath as each one fills in.
+
 ## Periodic Notes and Journals
 
 With the [Journals](https://github.com/srg-kostyrko/obsidian-journals) plugin installed, the calendar axis above the timeline is clickable:
@@ -321,11 +323,19 @@ A task line in a periodic note becomes a note on the timeline at that note's dat
 
 Each marker gets its own icon and color, configured in the Periodic Notes tab, which start out as `n` (note), `!` (important), `?` (question), `i` (info), `*` (highlight), and `b` (bookmark). Markers use Obsidian's checkbox syntax, so the same characters your theme styles as custom checkboxes work here, and the rendered note carries a `data-task` attribute for further styling. Plain `- [ ]` and `- [x]` lines are ignored.
 
-Notes are truncated on the timeline and show the full text on hover; clicking one opens the source note on that line. If the line links to a note that has its own row — `- [n] [[Project Atlas]] shipped the beta` — the note attaches to that row instead of the shared journal lane.
+Notes are truncated on the timeline and show the full text on hover; clicking one opens the source note on that line. Editing a periodic note leaves open dashboards alone until the typing pauses, and only redraws them when a marked line or a tracked property actually changed. If the line links to a note that has its own row — `- [n] [[Project Atlas]] shipped the beta` — the note attaches to that row instead of the shared journal lane; while that row is folded it goes back to the lane, since a folded row has no space to draw it.
+
+## How a note is drawn
+
+A note is its name in small type and a hairline in the note's colour running to the end of the period. How that line ends says whether the value did: an arrowhead means the note still holds it, an upright bar means it stopped there. Names are clipped rather than wrapped, so several notes read side by side across the same week, and names that would collide stack, so a row grows only as far as its notes need. Hovering a name grows it back to a readable size with the row properties it carries; a hint with the note name, its value, its dates, and those properties follows shortly after.
 
 ## Folding rows
 
-Every group header carries a fold toggle. Folding collapses the rows underneath into a single minimal lane that shows just the note titles, which keeps a long dashboard readable while still showing when each note changed. Fold state is saved per dashboard, and the overflow menu can fold or unfold everything at once.
+Every group header carries a fold toggle. Folding collapses the rows underneath into a single line, which keeps a long dashboard readable while still showing where the activity is. Fold state is saved per dashboard, and the overflow menu can fold or unfold everything at once.
+
+A folded row draws no notes. It carries one number per day instead — how many of that group's notes sit on that day — and hovering a number names them, along with the value each one held. Every count stays on the one line, so days that crowd together at a wide zoom overlap rather than growing the row back.
+
+The shared journal lane folds the same way, and its counts land in each day's own column rather than in the label: folded, the label keeps only its marker icon.
 
 ## Global value styles
 

@@ -479,8 +479,19 @@ button.property-logs-palette-swatch:focus-visible {
   box-shadow: none;
 }
 
+/* vis-timeline's item is an inline-block holding another inline-block, so the
+   row's own font sets a line box around the label — some 24px of slack under
+   an 11px name, and the whole reason a row looked double-spaced. Zeroing the
+   box's own type leaves the label to size the row by itself. */
+.property-logs-timeline .vis-item.property-logs-segment {
+  border-radius: 0;
+  font-size: 0;
+  line-height: 0;
+}
+
 .property-logs-timeline .vis-item.property-logs-segment .vis-item-content {
   padding: 0;
+  vertical-align: top;
 }
 
 /* A block is only as wide as the dates it covers, which hides most note names
@@ -488,33 +499,43 @@ button.property-logs-palette-swatch:focus-visible {
    past the block — over today and on into the empty future — instead of
    clipping it. vis-timeline re-reads this on every redraw and folds the label
    width into its stacking maths, so names stay whole and rows stay free of
-   collisions at any zoom. Folded groups keep clipping: sharing one line is the
-   whole point of folding them. */
-.property-logs-timeline .vis-item.property-logs-segment:not(.is-folded) .vis-item-overflow {
+   collisions at any zoom. Folded rows rely on the same thing: a name longer
+   than its range still has to be read, and still has to keep its own line. */
+.property-logs-timeline .vis-item.property-logs-segment .vis-item-overflow {
   overflow: visible;
 }
 
+/* A note is drawn as its name in small type, a hairline in the note's colour
+   running to the end of the period, and an arrow while that value is still the
+   note's current one. Names are clipped rather than wrapped, so several notes
+   read side by side across the same week, and names that would collide stack.
+   The name paints above the line, which it also measures: both of the line's
+   edges are recomputed around its width on every redraw. */
 .property-logs-segment-button {
+  position: relative;
+  z-index: 1;
   display: flex;
   width: auto;
-  min-height: 1.25rem;
+  max-width: 10rem;
+  min-height: 0;
   align-items: center;
-  gap: var(--size-4-1, 4px);
-  padding: 0 var(--size-4-2, 8px);
-  overflow: visible;
+  gap: 3px;
+  padding: 0 2px;
+  overflow: hidden;
   border: 0;
-  border-radius: inherit;
-  /* The label carries the block's own colour, so it stays legible over the
-     bare calendar where it overhangs the block. */
-  background: var(--property-logs-segment-color, var(--interactive-accent));
-  color: inherit;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-normal);
   box-shadow: none;
   font: inherit;
-  font-weight: var(--font-medium);
+  font-size: var(--property-logs-segment-font-size, 0.55rem);
+  font-weight: var(--font-semibold);
+  line-height: 1.3;
+  letter-spacing: -0.005em;
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
-  transition: opacity 120ms ease;
+  transition: none;
 }
 
 .property-logs-segment-title,
@@ -523,13 +544,20 @@ button.property-logs-palette-swatch:focus-visible {
 }
 
 .property-logs-segment-title {
+  overflow: hidden;
   font-weight: var(--font-semibold);
+  text-overflow: ellipsis;
 }
 
+/* Properties are in the markup so a hover can reveal them without the row
+   being rebuilt, but a name this small has no room to carry them unasked. */
 .property-logs-segment-meta {
+  display: none;
+  overflow: hidden;
   opacity: 0.78;
   font-size: 0.9em;
   font-weight: var(--font-normal);
+  text-overflow: ellipsis;
 }
 
 .property-logs-timeline .vis-panel.vis-center {
@@ -541,18 +569,21 @@ button.property-logs-palette-swatch:focus-visible {
 }
 
 .property-logs-segment-button:hover,
-.property-logs-segment-button:active {
-  border: 0;
-  background: var(--property-logs-segment-color, var(--interactive-accent));
-  box-shadow: none;
+.property-logs-segment-button:active,
+.property-logs-segment-button:focus-visible {
+  max-width: 26rem;
+  padding: 0 var(--size-4-1, 4px);
+  gap: var(--size-4-1, 4px);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s, 0 1px 4px rgba(0, 0, 0, 0.3));
+  color: var(--text-normal);
+  font-size: 0.7rem;
+  opacity: 1;
 }
 
-.property-logs-segment-button:hover {
-  opacity: 0.88;
-}
-
-.property-logs-segment-button:active {
-  opacity: 0.72;
+.property-logs-segment-button:hover .property-logs-segment-meta,
+.property-logs-segment-button:focus-visible .property-logs-segment-meta {
+  display: inline;
 }
 
 .property-logs-segment-button:focus-visible,
@@ -687,8 +718,15 @@ button.property-logs-palette-swatch:focus-visible {
 
 @media (prefers-reduced-motion: reduce) {
   .property-logs-segment-button,
+  .property-logs-journal-button,
+  .property-logs-timeline-wrapper,
+  .property-logs-timeline .vis-item,
   .status-history-tab-btn {
     transition: none;
+  }
+
+  .property-logs-timeline-wrapper {
+    opacity: 1;
   }
 }
 
@@ -711,6 +749,22 @@ button.property-logs-palette-swatch:focus-visible {
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
+  /* vis-timeline positions its blocks over two frames. Holding the wrapper
+     back until the second one trades a visible jump for one short fade. */
+  opacity: 0;
+  transition: opacity 130ms ease;
+}
+
+.property-logs-timeline-wrapper.is-ready {
+  opacity: 1;
+}
+
+/* Our hints carry a note name on the first line and its detail underneath, so
+   the line breaks have to survive into Obsidian's tooltip. */
+.tooltip.property-logs-tooltip {
+  max-width: min(24rem, 80vw);
+  text-align: left;
+  white-space: pre-line;
 }
 
 /* ─── Clickable calendar axis ──────────────────────────────────────────────── */
@@ -825,6 +879,13 @@ button.property-logs-axis-cell:focus-visible {
   z-index: 1;
 }
 
+/* vis-timeline slides an item to its new row over 0.4s, which reads as the
+   dashboard still settling long after it has finished. Short enough to follow,
+   fast enough to be over before the eye asks why. */
+.property-logs-timeline .vis-item {
+  transition: top 150ms ease;
+}
+
 /* Journal pills are annotations on top of the run they belong to, so they keep
    the layer above the blocks they would otherwise disappear behind. */
 .property-logs-timeline .vis-item.property-logs-journal-note {
@@ -888,22 +949,112 @@ button.property-logs-axis-cell:focus-visible {
   color: var(--text-muted);
 }
 
-.property-logs-segment-button.is-folded {
-  max-width: 22rem;
-  padding: 0 var(--size-4-1, 4px);
-  gap: var(--size-4-1, 4px);
-  overflow: hidden;
-  font-size: var(--font-ui-smaller);
+/* The line: from the end of the name to the end of the range, in the note's
+   own colour. It sits under the name (which paints above it) and is left
+   entirely behind a name that outruns a short range. */
+.property-logs-timeline .vis-item.property-logs-segment::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: 50%;
+  left: var(--property-logs-line-start, 0px);
+  width: max(0px, calc(var(--property-logs-line-end, 100%) - var(--property-logs-line-start, 0px)));
+  height: 1px;
+  border-radius: 1px;
+  background: var(--property-logs-segment-color, var(--text-muted));
+  opacity: 0.85;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
 
-.property-logs-segment-button.is-folded .property-logs-segment-title,
-.property-logs-segment-button.is-folded .property-logs-segment-meta {
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* How the line ends says whether the value did. An arrowhead means the note
+   still holds it and the line is running on past the period; an upright bar
+   means the value stopped there. Both sit at the same place, so a row reads
+   as one row of endings. */
+.property-logs-timeline .vis-item.property-logs-segment::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: 50%;
+  left: var(--property-logs-line-end, 100%);
+  opacity: 0.95;
+  transform: translate(-1px, -50%);
+  pointer-events: none;
 }
 
-.property-logs-timeline .vis-item.property-logs-segment.is-folded {
-  border-radius: var(--radius-s, 4px);
+.property-logs-timeline .vis-item.property-logs-segment.is-ongoing::after {
+  width: 0;
+  height: 0;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  border-left: 5px solid var(--property-logs-segment-color, var(--text-muted));
+}
+
+.property-logs-timeline .vis-item.property-logs-segment:not(.is-ongoing)::after {
+  width: 1px;
+  height: 7px;
+  border-radius: 1px;
+  background: var(--property-logs-segment-color, var(--text-muted));
+}
+
+/* A hovered name grows over its neighbours, so its item rises above them. */
+.property-logs-timeline .vis-item.property-logs-segment:hover {
+  z-index: 20;
+}
+
+/* ─── Folded rows: one count per day ───────────────────────────────────────── */
+
+/* A folded row is a single line of days, each carrying how many notes sit
+   there and naming them on hover. Every count shares one subgroup, so they
+   stay on that line and overlap rather than stacking when a wide zoom presses
+   the days together. */
+.property-logs-timeline .vis-item.property-logs-day-count {
+  border: 0;
+  overflow: visible;
+  background: transparent;
+  box-shadow: none;
+  /* As with the notes: the item's own line box would otherwise set the row's
+     height from the row's font rather than from the count itself. */
+  font-size: 0;
+  line-height: 0;
+}
+
+.property-logs-timeline .vis-item.vis-point.property-logs-day-count .vis-dot {
+  display: none;
+}
+
+.property-logs-timeline .vis-item.property-logs-day-count .vis-item-content {
+  padding: 0;
+}
+
+/* The item starts at midday, so pulling the count back by half its own width
+   centres it in that day's column at any zoom. */
+.property-logs-day-count-badge {
+  display: inline-flex;
+  min-width: 0.95rem;
+  height: 0.95rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  font-family: var(--font-interface);
+  font-size: var(--property-logs-segment-font-size, 0.55rem);
+  font-weight: var(--font-semibold);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  transform: translateX(-50%);
+  cursor: default;
+}
+
+.property-logs-day-count-badge:hover {
+  background: var(--background-modifier-border-hover, var(--background-modifier-hover));
+  color: var(--text-normal);
+}
+
+.property-logs-timeline .vis-item.property-logs-day-count:hover {
+  z-index: 20;
 }
 
 /* The label column folded away to nothing. vis-timeline measures the left
@@ -1019,6 +1170,10 @@ button.property-logs-axis-cell:focus-visible {
   box-shadow: none;
 }
 
+.property-logs-timeline .vis-item.property-logs-journal-note:hover {
+  z-index: 20;
+}
+
 .property-logs-journal-icon {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1039,15 +1194,39 @@ button.property-logs-axis-cell:focus-visible {
 
 .property-logs-journal-lane-label {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: var(--size-4-1, 4px);
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  line-height: 1.3;
+}
+
+.property-logs-journal-lane-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Folded, the lane is a marker and a number: vis sizes the row from this
+   label, so shrinking it is what hands the space back to the calendar. */
+.property-logs-journal-lane-label.is-folded {
+  gap: 3px;
+  font-size: 0.62rem;
+}
+
+.property-logs-journal-lane-label.is-folded .property-logs-journal-lane-name {
+  display: none;
 }
 
 .property-logs-journal-lane-icon svg {
   width: var(--icon-xs);
   height: var(--icon-xs);
+}
+
+.property-logs-journal-lane-label.is-folded .property-logs-journal-lane-icon svg {
+  width: 0.7rem;
+  height: 0.7rem;
 }
 
 .property-logs-timeline .vis-label.property-logs-journal-lane {
@@ -1184,7 +1363,6 @@ button.property-logs-axis-cell:focus-visible {
   padding: 0 var(--size-4-1, 4px);
 }
 
-.property-logs-dashboard.is-minimal .property-logs-segment-button,
 .property-logs-dashboard.is-minimal .property-logs-row-title {
   min-height: 1rem;
   padding: 0 var(--size-4-1, 4px);
@@ -1199,6 +1377,22 @@ button.property-logs-axis-cell:focus-visible {
 .property-logs-dashboard.is-minimal .property-logs-segment-meta,
 .property-logs-dashboard.is-minimal .property-logs-row-metadata {
   display: none;
+}
+
+.property-logs-dashboard.is-minimal {
+  --property-logs-segment-font-size: 0.5rem;
+}
+
+.property-logs-dashboard.is-minimal .property-logs-segment-button:hover,
+.property-logs-dashboard.is-minimal .property-logs-segment-button:focus-visible {
+  padding: 0 var(--size-4-1, 4px);
+  font-size: 0.7rem;
+}
+
+/* Hover expansion still shows the properties a minimal embed hides at rest. */
+.property-logs-dashboard.is-minimal .property-logs-segment-button:hover .property-logs-segment-meta,
+.property-logs-dashboard.is-minimal .property-logs-segment-button:focus-visible .property-logs-segment-meta {
+  display: inline;
 }
 
 .property-logs-dashboard.is-minimal .vis-time-axis .vis-text {
@@ -1238,9 +1432,13 @@ input.property-logs-marker-icon-input {
   min-height: 2.25rem;
 }
 
-.property-logs-dashboard.is-mobile-layout .property-logs-journal-button,
-.property-logs-dashboard.is-mobile-layout .property-logs-segment-button {
+.property-logs-dashboard.is-mobile-layout .property-logs-journal-button {
   min-height: 1.75rem;
+}
+
+/* Touch has no hover to fall back on, so names and counts stay readable. */
+.property-logs-dashboard.is-mobile-layout {
+  --property-logs-segment-font-size: 0.65rem;
 }
 
 .property-logs-dashboard.is-mobile-layout .property-logs-timeline-wrapper {
