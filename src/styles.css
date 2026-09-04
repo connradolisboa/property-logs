@@ -680,10 +680,26 @@ button.property-logs-palette-swatch:focus-visible {
   box-shadow: none;
 }
 
+/* vis-timeline assigns light backgrounds and ever-growing insets to nested
+   labels after it renders them. Keep the plugin's surface and give every
+   subgroup one compact, predictable indent instead. `!important` is needed
+   because vis injects its own nesting stylesheet after the plugin stylesheet. */
 .property-logs-timeline .vis-label.vis-nested-group,
 .property-logs-timeline .vis-label.vis-nested-group.vis-group-level-0,
-.property-logs-timeline .vis-label.vis-nested-group.vis-group-level-1 {
-  background: var(--background-secondary);
+.property-logs-timeline .vis-label.vis-nested-group.vis-group-level-1,
+.property-logs-timeline .vis-label.vis-nested-group.vis-group-level-2,
+.property-logs-timeline .vis-label.vis-nested-group .vis-inner {
+  background: var(--background-secondary) !important;
+}
+
+.property-logs-timeline .vis-ltr .vis-label.vis-nested-group .vis-inner {
+  padding-left: var(--size-4-2, 8px) !important;
+  padding-right: var(--size-4-2, 8px) !important;
+}
+
+.property-logs-timeline .vis-rtl .vis-label.vis-nested-group .vis-inner {
+  padding-right: var(--size-4-2, 8px) !important;
+  padding-left: var(--size-4-2, 8px) !important;
 }
 
 .property-logs-timeline .vis-label.vis-nesting-group::before {

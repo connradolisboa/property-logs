@@ -1240,7 +1240,12 @@ export class DashboardTimeline {
           const parentFoldable = bucketRows.length > 1 || statuses.length > 1;
           const childIds = statuses.map(([status]) => groupId(`${parentId}:status`, status));
 
-          model.groupLabelText.set(parentId, outerValue);
+          // With the label column folded, only one label should float into a
+          // visible nested row. An expanded parent has no timeline blocks of
+          // its own, so its children carry the combined path instead. A
+          // folded parent does hold the summary blocks, so it carries its own
+          // label again.
+          model.groupLabelText.set(parentId, parentFolded ? outerValue : "");
           model.groups.push({
             id: parentId,
             props: {
@@ -1271,7 +1276,7 @@ export class DashboardTimeline {
             const childId = childIds[index];
             const childFoldable = statusBucket.notes.size > 1;
             const childFolded = childFoldable && this.isFolded(dashboard, childId);
-            model.groupLabelText.set(childId, status);
+            model.groupLabelText.set(childId, `${outerValue} · ${status}`);
             model.groups.push({
               id: childId,
               props: {

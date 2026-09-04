@@ -41448,7 +41448,7 @@ var DashboardTimeline = class {
         const statuses = Array.from(statusBuckets.entries()).sort(([firstStatus, first], [secondStatus, second]) => first.level - second.level || compareText(firstStatus, secondStatus));
         const parentFoldable = bucketRows.length > 1 || statuses.length > 1;
         const childIds = statuses.map(([status]) => groupId(`${parentId}:status`, status));
-        model.groupLabelText.set(parentId, outerValue);
+        model.groupLabelText.set(parentId, parentFolded ? outerValue : "");
         model.groups.push({
           id: parentId,
           props: {
@@ -41478,7 +41478,7 @@ var DashboardTimeline = class {
           const childId = childIds[index];
           const childFoldable = statusBucket.notes.size > 1;
           const childFolded = childFoldable && this.isFolded(dashboard, childId);
-          model.groupLabelText.set(childId, status);
+          model.groupLabelText.set(childId, `${outerValue} \xB7 ${status}`);
           model.groups.push({
             id: childId,
             props: {
