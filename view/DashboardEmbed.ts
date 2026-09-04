@@ -188,6 +188,12 @@ export class DashboardEmbed extends MarkdownRenderChild {
       showToolbar: options.minimal ? false : options.header,
       maxHeight: options.height,
       windowDays: options.windowDays,
+      scroll: options.scroll,
+      dashboardOverrides: {
+        groupBy: options.groupBy ?? undefined,
+        sortBy: options.sortBy ?? undefined,
+        sortAscending: options.sortAscending ?? undefined,
+      },
     });
     this.timeline.setDashboardId(dashboard.id);
     this.timeline.setFocus(context

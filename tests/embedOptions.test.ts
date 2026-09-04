@@ -60,3 +60,24 @@ test("minimal accepts boolean values and rejects other input", () => {
   assert.equal(invalid.minimal, false);
   assert.equal(invalid.errors.length, 1);
 });
+
+test("block-local layout overrides are parsed without changing dashboard defaults", () => {
+  const options = parseEmbedOptions([
+    "groupBy: property:areas",
+    "sortBy: property:priority",
+    "sortAscending: false",
+    "scroll: true",
+  ].join("\n"));
+
+  assert.equal(options.groupBy, "property:areas");
+  assert.equal(options.sortBy, "property:priority");
+  assert.equal(options.sortAscending, false);
+  assert.equal(options.scroll, true);
+  assert.deepEqual(options.errors, []);
+});
+
+test("file tags and a natural-height embed are supported", () => {
+  const options = parseEmbedOptions("groupBy: file.tags\nscroll: false");
+  assert.equal(options.groupBy, "file.tags");
+  assert.equal(options.scroll, false);
+});

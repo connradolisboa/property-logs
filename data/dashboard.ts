@@ -19,7 +19,8 @@ export interface DashboardScopeFilter {
   excludedProperties: DashboardPropertyRule[];
 }
 
-export type DashboardGroupBy = "status" | "none" | "folder" | "level" | `property:${string}`;
+/** `file.tags` is Obsidian metadata; `property:tags` is a literal frontmatter key. */
+export type DashboardGroupBy = "status" | "none" | "folder" | "level" | "file.tags" | `property:${string}`;
 export type DashboardSortBy = "alphabetical" | "level" | "recent" | `property:${string}`;
 export type NoteOpenGesture = "click" | "ctrl-click";
 
@@ -175,6 +176,7 @@ export function normalizeDashboardSettings(
     value.groupBy === "none" ||
     value.groupBy === "folder" ||
     value.groupBy === "level" ||
+    value.groupBy === "file.tags" ||
     value.groupBy.startsWith("property:")
   ) ? value.groupBy as DashboardGroupBy : defaults.groupBy;
   const sortBy = typeof value.sortBy === "string" && (

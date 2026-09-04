@@ -291,7 +291,11 @@ zoom: auto
 | `date` | `auto` | `auto` uses the host note's own period; `today` or a `YYYY-MM-DD` date pins the embed |
 | `period` | `auto` | Forces `day`, `week`, `month`, `quarter`, or `year` instead of the note's own type |
 | `zoom` | `auto` | Visible span such as `30d`, `6w`, `3m`, or `1y`. `auto` uses the span configured for the note type |
-| `height` | `420` | Maximum height in pixels |
+| `height` | `420` | Maximum height in pixels while the embed scrolls |
+| `scroll` | `auto` | `auto` keeps the normal capped embed; `true` forces an inner vertical scroller; `false` lets the embed grow with its rows |
+| `groupBy` | dashboard default | Local grouping override: `status`, `none`, `folder`, `level`, `file.tags`, or `property:<key>` |
+| `sortBy` | dashboard default | Local note-order override: `alphabetical`, `level`, `recent`, or `property:<key>` |
+| `sortAscending` | dashboard default | `true` for ascending order or `false` for descending order |
 | `header` | `true` | Shows the slim header with the dashboard name, period, and zoom controls |
 | `minimal` | `false` | Hides the header/zoom controls and shrinks rows, text, and spacing for a low-profile embed |
 
@@ -300,6 +304,19 @@ In a periodic note the embed centers on that note's date and zooms to match its 
 Because the embed reads the period from the note the block is rendered for, it also works with [Virtual Content](https://github.com/Signynt/virtual-footer): put the code block in a Virtual Content rule for your daily notes and every daily note gets a dashboard centered on its own date without touching the files.
 
 An embed holds the space it will take and builds itself as you scroll near it, so a note carrying several of them opens at once and nothing shifts underneath as each one fills in.
+
+`groupBy`, `sortBy`, and `sortAscending` affect only that code block; they never change the saved dashboard. For example:
+
+````markdown
+```property-logs
+dashboard: Projects
+groupBy: property:areas
+sortBy: property:priority
+sortAscending: false
+scroll: true
+height: 320
+```
+````
 
 ## Periodic Notes and Journals
 
@@ -327,11 +344,13 @@ Notes are truncated on the timeline and show the full text on hover; clicking on
 
 ## How a note is drawn
 
-A note is its name in small type and a hairline in the note's colour running to the end of the period. How that line ends says whether the value did: an arrowhead means the note still holds it, an upright bar means it stopped there. Names are clipped rather than wrapped, so several notes read side by side across the same week, and names that would collide stack, so a row grows only as far as its notes need. Hovering a name grows it back to a readable size with the row properties it carries; a hint with the note name, its value, its dates, and those properties follows shortly after.
+A note is its name in small type and a hairline in the note's colour running to the end of the period. How that line ends says whether the value did: an arrowhead means the note still holds it, an upright bar means it stopped there. When a note moves directly between two visible, non-zero values, a curved arrow links the end of its old line to the start of its new one. A transition through level 0 deliberately has no link because that value is hidden. Names are clipped rather than wrapped, so several notes read side by side across the same week, and names that would collide stack, so a row grows only as far as its notes need. Hovering a name grows it back to a readable size with the row properties it carries; a hint with the note name, its value, its dates, and those properties follows shortly after.
 
-## Folding rows
+## Grouping and folding rows
 
-Every group header carries a fold toggle. Folding collapses the rows underneath into a single line, which keeps a long dashboard readable while still showing where the activity is. Fold state is saved per dashboard, and the overflow menu can fold or unfold everything at once.
+`status` keeps the familiar flat status rows. Grouping by a folder, level, `property:<key>`, or `file.tags` adds a foldable outer group, with foldable tracked-value/status rows inside it. For example, `groupBy: property:areas` draws `Personal → Active`, `Personal → Backlog`, and so on. A multi-value property places a note in each matching group; blank or missing values use **No value**. `file.tags` reads Obsidian’s file tags, while `property:tags` reads the literal frontmatter property.
+
+Every outer group and status subgroup carries a fold toggle. Folding collapses the rows underneath into a single line, which keeps a long dashboard readable while still showing where the activity is. Fold state is saved per dashboard, and the overflow menu can fold or unfold everything at once.
 
 A folded row draws no notes. It carries one number per day instead — how many of that group's notes sit on that day — and hovering a number names them, along with the value each one held. Every count stays on the one line, so days that crowd together at a wide zoom overlap rather than growing the row back.
 

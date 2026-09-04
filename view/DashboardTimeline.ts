@@ -77,12 +77,17 @@ export interface DashboardTimelineOptions {
   maxHeight?: number | null;
   /** Overrides the calendar span shown around the focused period. */
   windowDays?: number | null;
+  /** In an embed, false lets the timeline grow naturally instead of adding an inner scroller. */
+  scroll?: boolean | null;
+  /** Per-embed presentation choices. These intentionally do not persist. */
+  dashboardOverrides?: Partial<Pick<DashboardSettings, "groupBy" | "sortBy" | "sortAscending">>;
   onOpenFullDashboard?: (dashboardId: string) => void;
 }
 
 interface TimelineRow {
   file: TFile;
   frontmatter: Record<string, unknown>;
+  fileTags: string[];
   history: unknown;
   parsed: HistoryParserResult;
   level: TimelineLevel;
@@ -230,12 +235,26 @@ function compareRows(first: TimelineRow, second: TimelineRow, dashboard: Dashboa
   return comparison * direction || compareText(first.file.basename, second.file.basename);
 }
 
-function rowGroupValue(row: TimelineRow, dashboard: DashboardSettings): string {
-  if (dashboard.groupBy === "folder") return row.file.parent?.path || "Vault root";
-  if (dashboard.groupBy === "level") return `Level ${row.level}`;
+function rowGroupValues(row: TimelineRow, dashboard: DashboardSettings): string[] {
+  if (dashboard.groupBy === "folder") return [row.file.parent?.path || "Vault root"];
+  if (dashboard.groupBy === "level") return [`Level ${row.level}`];
+  if (dashboard.groupBy === "file.tags") return row.fileTags.length > 0 ? row.fileTags : ["No value"];
   const propertyKey = propertyKeyFromMode(dashboard.groupBy);
-  if (propertyKey) return displayPropertyValue(row.frontmatter[propertyKey]) || "Unset";
-  return "";
+  if (propertyKey) {
+    const value = row.frontmatter[propertyKey];
+    const values = Array.isArray(value)
+      ? value.flatMap((item) => {
+          const display = displayPropertyValue(item);
+          return display ? [display] : [];
+        })
+      : displayPropertyValue(value) ? [displayPropertyValue(value)] : [];
+    return values.length > 0 ? values : ["No value"];
+  }
+  return [""];
+}
+
+function groupId(kind: string, value: string): string {
+  return `${kind}:${encodeURIComponent(value)}`;
 }
 
 function addDays(date: Date, days: number): Date {
@@ -419,21 +438,27 @@ export class DashboardTimeline {
 
   async render(): Promise<void> {
     const token = ++this.renderToken;
-    const dashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
-    if (!dashboard) {
+    const savedDashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
+    if (!savedDashboard) {
       this.destroyTimeline();
       this.containerEl.empty();
       this.containerEl.addClass("property-logs-dashboard");
       this.renderNoDashboard();
       return;
     }
-    this.dashboardId = dashboard.id;
+    this.dashboardId = savedDashboard.id;
+    const dashboard = this.resolveDashboard(savedDashboard);
     // A rebuild throws every block away and lays the calendar out from scratch.
     // When the change is one the drawn timeline can absorb — an edited note, a
     // new status, another colour mode — the data is updated in place instead,
     // which is both far cheaper and leaves the view where the user left it.
     if (this.canUpdateInPlace(dashboard) && this.updateInPlace(token, dashboard)) return;
     await this.renderFull(token, dashboard);
+  }
+
+  /** Applies block-local presentation choices without ever mutating saved settings. */
+  private resolveDashboard(dashboard: DashboardSettings): DashboardSettings {
+    return { ...dashboard, ...this.options.dashboardOverrides };
   }
 
   /** Tears the dashboard down and builds it again, skeleton and all. */
@@ -548,6 +573,7 @@ export class DashboardTimeline {
       String(this.options.minimal === true),
       String(this.options.showToolbar === false),
       String(this.options.maxHeight ?? ""),
+      String(this.options.scroll ?? "auto"),
     ].join("|");
   }
 
@@ -609,7 +635,8 @@ export class DashboardTimeline {
 
     return files.flatMap((file) => {
       const row = cache.forFile("row", file, parseKey, (): TimelineRow | null => {
-        const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as
+        const cacheEntry = this.app.metadataCache.getFileCache(file);
+        const frontmatter = cacheEntry?.frontmatter as
           | Record<string, unknown>
           | undefined;
         const metadata = frontmatter ?? {};
@@ -634,6 +661,7 @@ export class DashboardTimeline {
         return {
           file,
           frontmatter: metadata,
+          fileTags: (cacheEntry?.tags ?? []).map((tag) => tag.tag),
           history,
           parsed,
           level: parsed.currentLevel,
@@ -712,7 +740,7 @@ export class DashboardTimeline {
     }
     if (unchanged) return;
 
-    const current = this.host.getDashboard(this.dashboardId) ?? dashboard;
+    const current = this.resolveDashboard(this.host.getDashboard(this.dashboardId) ?? dashboard);
     const files = this.host.getDashboardFiles(current);
     const model = this.buildModel(this.buildRows(current, files), current);
     this.addJournalItems(model, notes, current);
@@ -840,6 +868,7 @@ export class DashboardTimeline {
       ["none", "No grouping"],
       ["folder", "Folder"],
       ["level", "Current level"],
+      ["file.tags", "File tags"],
       ...properties.map((property): [string, string] => [`property:${property}`, property]),
     ], async (value) => {
       dashboard.groupBy = value as DashboardSettings["groupBy"];
@@ -1140,81 +1169,121 @@ export class DashboardTimeline {
             this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId);
           });
         });
-    } else {
+    } else if (dashboard.groupBy === "none") {
       const buckets = new Map<string, TimelineRow[]>();
-      if (dashboard.groupBy === "none") {
-        buckets.set("", sortedRows);
-      } else {
-        sortedRows.forEach((row) => {
-          const key = rowGroupValue(row, dashboard);
-          const bucket = buckets.get(key) ?? [];
-          bucket.push(row);
-          buckets.set(key, bucket);
+      let order = 0;
+      sortedRows.forEach((row) => {
+        const groupId = `note:${row.file.path}`;
+        model.noteGroupIds.set(row.file.path, groupId);
+        model.groupLabelText.set(groupId, row.file.basename);
+        model.groups.push({
+          id: groupId,
+          props: {
+            id: groupId,
+            className: row.parsed.malformed ? "property-logs-row-malformed" : "property-logs-row",
+            order: order++,
+          },
+          contentKey: this.rowLabelKey(row, dashboard),
+          createContent: () => this.createRowLabel(row, dashboard),
         });
-      }
+        row.parsed.segments.forEach((segment, segmentIndex) => {
+          this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId);
+        });
+      });
+    } else {
+      const outerBuckets = new Map<string, TimelineRow[]>();
+      sortedRows.forEach((row) => {
+        rowGroupValues(row, dashboard).forEach((value) => {
+          const bucket = outerBuckets.get(value) ?? [];
+          bucket.push(row);
+          outerBuckets.set(value, bucket);
+        });
+      });
 
       let order = 0;
-      Array.from(buckets.entries())
+      Array.from(outerBuckets.entries())
         .sort(([first], [second]) => compareText(first, second))
-        .forEach(([bucket, bucketRows]) => {
-          const parentId = `bucket:${bucket}`;
-          const foldable = dashboard.groupBy !== "none" && bucketRows.length > 1;
-          const folded = foldable && this.isFolded(dashboard, parentId);
+        .forEach(([outerValue, bucketRows]) => {
+          const parentId = groupId("bucket", outerValue);
+          const parentFolded = this.isFolded(dashboard, parentId);
+          const statusBuckets = new Map<string, {
+            level: TimelineLevel;
+            notes: Set<string>;
+            segments: Array<{ row: TimelineRow; segment: TimelineSegment; segmentIndex: number }>;
+          }>();
+          bucketRows.forEach((row) => row.parsed.segments.forEach((segment, segmentIndex) => {
+            const status = segment.value ?? "No value";
+            const bucket = statusBuckets.get(status) ?? {
+              level: segment.level,
+              notes: new Set<string>(),
+              segments: [],
+            };
+            bucket.level = Math.max(bucket.level, segment.level) as TimelineLevel;
+            bucket.notes.add(row.file.path);
+            bucket.segments.push({ row, segment, segmentIndex });
+            statusBuckets.set(status, bucket);
+          }));
+          const statuses = Array.from(statusBuckets.entries()).sort(([firstStatus, first], [secondStatus, second]) =>
+            first.level - second.level || compareText(firstStatus, secondStatus));
+          const parentFoldable = bucketRows.length > 1 || statuses.length > 1;
+          const childIds = statuses.map(([status]) => groupId(`${parentId}:status`, status));
 
-          if (dashboard.groupBy !== "none") {
-            const count = bucketRows.length;
-            model.groupLabelText.set(parentId, bucket || "All notes");
-            model.groups.push({
+          model.groupLabelText.set(parentId, outerValue);
+          model.groups.push({
+            id: parentId,
+            props: {
               id: parentId,
-              props: {
-                id: parentId,
-                nestedGroups: folded ? undefined : bucketRows.map((row) => `note:${row.file.path}`),
-                showNested: folded ? undefined : true,
-                className: folded
-                  ? "property-logs-group-header is-folded"
-                  : "property-logs-group-header",
-                order: order++,
-              },
-              contentKey: `bucket|${bucket}|${count}|${foldable}|${folded}`,
-              createContent: () => this.createGroupLabel(
-                dashboard,
-                parentId,
-                this.createBucketLabel(bucket, count),
-                foldable
-              ),
-            });
-          }
+              nestedGroups: parentFolded ? undefined : childIds,
+              showNested: parentFolded ? undefined : true,
+              className: parentFolded
+                ? "property-logs-group-header is-folded"
+                : "property-logs-group-header",
+              order: order++,
+            },
+            contentKey: `outer|${outerValue}|${bucketRows.length}|${parentFoldable}|${parentFolded}`,
+            createContent: () => this.createGroupLabel(
+              dashboard, parentId, this.createBucketLabel(outerValue, bucketRows.length), parentFoldable
+            ),
+          });
 
-          if (folded) {
+          if (parentFolded) {
             const tallies = new Map<string, DayTally>();
-            bucketRows.forEach((row) => {
-              model.noteGroupIds.set(row.file.path, parentId);
-              row.parsed.segments.forEach((segment, segmentIndex) => {
-                this.tallySegment(tallies, row, segment, segmentIndex);
-              });
-            });
+            bucketRows.forEach((row) => row.parsed.segments.forEach((segment, segmentIndex) => {
+              this.tallySegment(tallies, row, segment, segmentIndex);
+            }));
             this.planDayCounts(model, parentId, tallies);
             return;
           }
 
-          bucketRows.forEach((row) => {
-            const groupId = `note:${row.file.path}`;
-            model.noteGroupIds.set(row.file.path, groupId);
-            model.groupLabelText.set(groupId, row.file.basename);
+          statuses.forEach(([status, statusBucket], index) => {
+            const childId = childIds[index];
+            const childFoldable = statusBucket.notes.size > 1;
+            const childFolded = childFoldable && this.isFolded(dashboard, childId);
+            model.groupLabelText.set(childId, status);
             model.groups.push({
-              id: groupId,
+              id: childId,
               props: {
-                id: groupId,
-                className: row.parsed.malformed
-                  ? "property-logs-row-malformed"
-                  : "property-logs-row",
+                id: childId,
+                className: childFolded
+                  ? "property-logs-status-group is-folded"
+                  : "property-logs-status-group",
                 order: order++,
               },
-              contentKey: this.rowLabelKey(row, dashboard),
-              createContent: () => this.createRowLabel(row, dashboard),
+              contentKey: `nested-status|${outerValue}|${status}|${statusBucket.notes.size}|${childFoldable}|${childFolded}`,
+              createContent: () => this.createGroupLabel(
+                dashboard, childId, this.createStatusLabel(status, statusBucket.notes.size), childFoldable
+              ),
             });
-            row.parsed.segments.forEach((segment, segmentIndex) => {
-              this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId);
+            if (childFolded) {
+              const tallies = new Map<string, DayTally>();
+              statusBucket.segments.forEach(({ row, segment, segmentIndex }) => {
+                this.tallySegment(tallies, row, segment, segmentIndex);
+              });
+              this.planDayCounts(model, childId, tallies);
+              return;
+            }
+            statusBucket.segments.forEach(({ row, segment, segmentIndex }) => {
+              this.planSegmentItem(model, row, dashboard, segment, segmentIndex, childId);
             });
           });
         });
@@ -1415,7 +1484,7 @@ export class DashboardTimeline {
       showMinorLabels: !showAxis,
       showMajorLabels: !showAxis,
       horizontalScroll: !compact && !Platform.isMobile,
-      verticalScroll: true,
+      verticalScroll: this.options.scroll !== false,
       moveable: interactive,
       zoomable: Platform.isMobile && interactive,
       zoomMin: 1000 * 60 * 60 * 24 * 7,
@@ -1430,7 +1499,9 @@ export class DashboardTimeline {
       start: visible.start,
       end: visible.end,
     };
-    if (compact) options.maxHeight = this.options.maxHeight ?? (minimal ? 220 : 420);
+    if (compact && this.options.scroll !== false) {
+      options.maxHeight = this.options.maxHeight ?? (minimal ? 220 : 420);
+    }
     else options.height = "100%";
     return options;
   }
@@ -1488,7 +1559,10 @@ export class DashboardTimeline {
     const items = this.timelineEl.querySelectorAll<HTMLElement>(
       ".vis-foreground .vis-item.property-logs-segment"
     );
-    if (items.length === 0) return;
+    if (items.length === 0) {
+      this.syncTransitionArrows();
+      return;
+    }
     const measured: Array<{ item: HTMLElement; start: number; end: number }> = [];
     // Read everything first, then write: interleaving the two makes the
     // browser lay the row out again for every single item.
@@ -1516,6 +1590,91 @@ export class DashboardTimeline {
       item.style.setProperty("--property-logs-line-start", `${start}px`);
       item.style.setProperty("--property-logs-line-end", `${end}px`);
     });
+    this.syncTransitionArrows();
+  }
+
+  /**
+   * Connects consecutive visible values of one note across their rows. CSS can
+   * draw a segment's own horizontal line, but a change from Backlog to Active
+   * crosses DOM rows, so it needs this lightweight SVG overlay.
+   */
+  private syncTransitionArrows(): void {
+    if (!this.timelineEl) return;
+    this.timelineEl.querySelector(".property-logs-transition-arrows")?.remove();
+    const anchors = Array.from(this.timelineEl.querySelectorAll<HTMLElement>(
+      ".vis-foreground .property-logs-segment-button[data-transition-note]"
+    ));
+    if (anchors.length < 2) return;
+
+    const timelineBounds = this.timelineEl.getBoundingClientRect();
+    if (timelineBounds.width <= 0 || timelineBounds.height <= 0) return;
+    const byNoteAndScope = new Map<string, Map<number, HTMLElement>>();
+    anchors.forEach((anchor) => {
+      const note = anchor.dataset.transitionNote;
+      const scope = anchor.dataset.transitionScope;
+      const index = Number(anchor.dataset.transitionIndex);
+      if (!note || !scope || !Number.isInteger(index)) return;
+      const key = `${note}\u0000${scope}`;
+      const entries = byNoteAndScope.get(key) ?? new Map<number, HTMLElement>();
+      entries.set(index, anchor);
+      byNoteAndScope.set(key, entries);
+    });
+
+    const paths: Array<{ start: HTMLElement; end: HTMLElement }> = [];
+    byNoteAndScope.forEach((entries) => {
+      entries.forEach((end, index) => {
+        if (end.dataset.connectsFromPrevious !== "true") return;
+        const start = entries.get(index - 1);
+        if (start) paths.push({ start, end });
+      });
+    });
+    if (paths.length === 0) return;
+
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.classList.add("property-logs-transition-arrows");
+    svg.setAttribute("width", String(this.timelineEl.clientWidth));
+    svg.setAttribute("height", String(this.timelineEl.clientHeight));
+    svg.setAttribute("viewBox", `0 0 ${this.timelineEl.clientWidth} ${this.timelineEl.clientHeight}`);
+    const defs = document.createElementNS(ns, "defs");
+    const marker = document.createElementNS(ns, "marker");
+    marker.setAttribute("id", "property-logs-transition-arrowhead");
+    marker.setAttribute("viewBox", "0 0 6 6");
+    marker.setAttribute("refX", "5");
+    marker.setAttribute("refY", "3");
+    marker.setAttribute("markerWidth", "5");
+    marker.setAttribute("markerHeight", "5");
+    marker.setAttribute("orient", "auto");
+    const head = document.createElementNS(ns, "path");
+    head.setAttribute("d", "M 0 0 L 6 3 L 0 6 z");
+    head.setAttribute("class", "property-logs-transition-arrowhead");
+    marker.appendChild(head);
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+
+    paths.forEach(({ start, end }) => {
+      const startItem = start.closest<HTMLElement>(".vis-item.property-logs-segment");
+      const endItem = end.closest<HTMLElement>(".vis-item.property-logs-segment");
+      if (!startItem || !endItem) return;
+      const startBounds = startItem.getBoundingClientRect();
+      const endBounds = endItem.getBoundingClientRect();
+      const lineEnd = Number.parseFloat(startItem.style.getPropertyValue("--property-logs-line-end"));
+      const lineStart = Number.parseFloat(endItem.style.getPropertyValue("--property-logs-line-start"));
+      if (!Number.isFinite(lineEnd) || !Number.isFinite(lineStart)) return;
+      const startX = startBounds.left - timelineBounds.left + lineEnd;
+      const startY = startBounds.top - timelineBounds.top + startBounds.height / 2;
+      const endX = endBounds.left - timelineBounds.left + lineStart;
+      const endY = endBounds.top - timelineBounds.top + endBounds.height / 2;
+      const bend = Math.max(8, Math.min(32, Math.abs(endX - startX) / 2));
+      const path = document.createElementNS(ns, "path");
+      path.setAttribute("d", `M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`);
+      path.setAttribute("class", "property-logs-transition-arrow");
+      path.setAttribute("marker-end", "url(#property-logs-transition-arrowhead)");
+      const color = endItem.style.getPropertyValue("--property-logs-segment-color").trim();
+      if (color) path.style.stroke = color;
+      svg.appendChild(path);
+    });
+    if (svg.childElementCount > 1) this.timelineEl.appendChild(svg);
   }
 
   private updateAxis(immediate = false): void {
@@ -1633,6 +1792,11 @@ export class DashboardTimeline {
     // value is still the note's current one. Names that would collide stack,
     // so a row grows only as far as its notes need.
     const className = `property-logs-segment${isCurrent ? " is-ongoing" : ""}`;
+    const transitionScope = groupId.startsWith("status:")
+      ? "status"
+      : groupId.includes(":status:")
+        ? groupId.slice(0, groupId.lastIndexOf(":status:"))
+        : groupId;
     model.items.push({
       id,
       props: {
@@ -1658,7 +1822,9 @@ export class DashboardTimeline {
         dashboard.rowProperties.join(","),
         dashboard.noteOpenGesture,
       ].join("|"),
-      createContent: () => this.createSegmentContent(row, dashboard, segment),
+      createContent: () => this.createSegmentContent(
+        row, dashboard, segment, segmentIndex, transitionScope, groupId
+      ),
     });
     model.itemRows.set(id, row);
   }
@@ -1900,11 +2066,19 @@ export class DashboardTimeline {
   private createSegmentContent(
     row: TimelineRow,
     dashboard: DashboardSettings,
-    segment: TimelineSegment
+    segment: TimelineSegment,
+    segmentIndex: number,
+    transitionScope: string,
+    groupId: string
   ): HTMLElement {
     const content = document.createElement("button");
     content.type = "button";
     content.className = "property-logs-segment-button";
+    content.dataset.transitionNote = row.file.path;
+    content.dataset.transitionIndex = String(segmentIndex);
+    content.dataset.transitionScope = transitionScope;
+    content.dataset.transitionGroup = groupId;
+    content.dataset.connectsFromPrevious = String(segment.connectsFromPrevious === true);
     const primaryAction = dashboard.noteOpenGesture === "click"
       ? "Click to open note; Ctrl-click to change value."
       : "Click to change value; Ctrl-click to open note.";

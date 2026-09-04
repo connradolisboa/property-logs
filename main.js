@@ -168,7 +168,7 @@ function normalizeDashboardSettings(raw, fallbackId, fallbackName) {
   const value = raw;
   const rawScope = value.scopeFilter && typeof value.scopeFilter === "object" && !Array.isArray(value.scopeFilter) ? value.scopeFilter : {};
   const rawLevelColors = stringMap(value.levelColors);
-  const groupBy = typeof value.groupBy === "string" && (value.groupBy === "status" || value.groupBy === "none" || value.groupBy === "folder" || value.groupBy === "level" || value.groupBy.startsWith("property:")) ? value.groupBy : defaults2.groupBy;
+  const groupBy = typeof value.groupBy === "string" && (value.groupBy === "status" || value.groupBy === "none" || value.groupBy === "folder" || value.groupBy === "level" || value.groupBy === "file.tags" || value.groupBy.startsWith("property:")) ? value.groupBy : defaults2.groupBy;
   const sortBy = typeof value.sortBy === "string" && (value.sortBy === "alphabetical" || value.sortBy === "level" || value.sortBy === "recent" || value.sortBy.startsWith("property:")) ? value.sortBy : defaults2.sortBy;
   return {
     id: typeof value.id === "string" && value.id ? value.id : defaults2.id,
@@ -1449,9 +1449,9 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
     dashboard.rowProperties = value.split(",").map((key) => key.trim()).filter(Boolean);
     await save();
   }));
-  new import_obsidian4.Setting(container).setName("Default group").setDesc("Use status, none, folder, level, or property:<key>. Status creates stacked note bars inside status rows.").addText((text) => text.setPlaceholder("status or property:area").setValue(dashboard.groupBy).onChange(async (value) => {
+  new import_obsidian4.Setting(container).setName("Default group").setDesc("Use status, none, folder, level, file.tags, or property:<key>. A non-status group creates foldable status subgroups inside each value.").addText((text) => text.setPlaceholder("status, file.tags, or property:areas").setValue(dashboard.groupBy).onChange(async (value) => {
     const trimmed = value.trim();
-    dashboard.groupBy = trimmed === "status" || trimmed === "folder" || trimmed === "level" || trimmed.startsWith("property:") ? trimmed : "none";
+    dashboard.groupBy = trimmed === "status" || trimmed === "folder" || trimmed === "level" || trimmed === "file.tags" || trimmed.startsWith("property:") ? trimmed : "none";
     await save();
   }));
   new import_obsidian4.Setting(container).setName("Default sort").setDesc("Use alphabetical, level, recent, or property:<key>.").addText((text) => text.setPlaceholder("alphabetical or property:priority").setValue(dashboard.sortBy).onChange(async (value) => {
@@ -1751,6 +1751,10 @@ function parseEmbedOptions(source) {
     height: null,
     header: true,
     minimal: false,
+    groupBy: null,
+    sortBy: null,
+    sortAscending: null,
+    scroll: null,
     errors: []
   };
   source.split(/\r?\n/).forEach((line) => {
@@ -1819,6 +1823,37 @@ function parseEmbedOptions(source) {
         const minimal = parseBoolean(value);
         if (minimal === null) options.errors.push(`"${value}" is not true or false.`);
         else options.minimal = minimal;
+        break;
+      }
+      case "groupby": {
+        const normalized = value.trim();
+        if (["status", "none", "folder", "level", "file.tags"].includes(normalized) || normalized.startsWith("property:")) {
+          options.groupBy = normalized;
+        } else {
+          options.errors.push(`"${value}" is not a group mode.`);
+        }
+        break;
+      }
+      case "sortby": {
+        const normalized = value.trim();
+        if (["alphabetical", "level", "recent"].includes(normalized) || normalized.startsWith("property:")) {
+          options.sortBy = normalized;
+        } else {
+          options.errors.push(`"${value}" is not a sort mode.`);
+        }
+        break;
+      }
+      case "sortascending": {
+        const ascending = parseBoolean(value);
+        if (ascending === null) options.errors.push(`"${value}" is not true or false.`);
+        else options.sortAscending = ascending;
+        break;
+      }
+      case "scroll": {
+        if (value.trim().toLowerCase() === "auto") break;
+        const scroll = parseBoolean(value);
+        if (scroll === null) options.errors.push(`"${value}" is not true, false, or auto.`);
+        else options.scroll = scroll;
         break;
       }
       default:
@@ -23974,8 +24009,8 @@ var Group = class {
    * @param {ItemSet} itemSet
    * @constructor Group
    */
-  constructor(groupId, data, itemSet) {
-    this.groupId = groupId;
+  constructor(groupId2, data, itemSet) {
+    this.groupId = groupId2;
     this.subgroups = {};
     this.subgroupStack = {};
     this.subgroupStackAll = false;
@@ -24959,8 +24994,8 @@ var BackgroundGroup = class extends Group {
    * @param {Object} data
    * @param {ItemSet} itemSet
    */
-  constructor(groupId, data, itemSet) {
-    super(groupId, data, itemSet);
+  constructor(groupId2, data, itemSet) {
+    super(groupId2, data, itemSet);
     this.width = 0;
     this.height = 0;
     this.top = 0;
@@ -26123,9 +26158,9 @@ var DataAxis = class extends Component {
     }
     const groupArray = _Object$keys(this.groups);
     _sortInstanceProperty(groupArray).call(groupArray, (a, b) => a < b ? -1 : 1);
-    for (const groupId of groupArray) {
-      if (this.groups[groupId].visible === true && (this.linegraphOptions.visibility[groupId] === void 0 || this.linegraphOptions.visibility[groupId] === true)) {
-        this.groups[groupId].getLegend(iconWidth, iconHeight, this.framework, x, y);
+    for (const groupId2 of groupArray) {
+      if (this.groups[groupId2].visible === true && (this.linegraphOptions.visibility[groupId2] === void 0 || this.linegraphOptions.visibility[groupId2] === true)) {
+        this.groups[groupId2].getLegend(iconWidth, iconHeight, this.framework, x, y);
         y += iconHeight + iconOffset;
       }
     }
@@ -26186,9 +26221,9 @@ var DataAxis = class extends Component {
     let resized = false;
     let activeGroups = 0;
     this.dom.lineContainer.style.top = "".concat(this.body.domProps.scrollTop, "px");
-    for (const groupId in this.groups) {
-      if (!Object.prototype.hasOwnProperty.call(this.groups, groupId)) continue;
-      if (this.groups[groupId].visible === true && (this.linegraphOptions.visibility[groupId] === void 0 || this.linegraphOptions.visibility[groupId] === true)) activeGroups++;
+    for (const groupId2 in this.groups) {
+      if (!Object.prototype.hasOwnProperty.call(this.groups, groupId2)) continue;
+      if (this.groups[groupId2].visible === true && (this.linegraphOptions.visibility[groupId2] === void 0 || this.linegraphOptions.visibility[groupId2] === true)) activeGroups++;
     }
     if (this.amountOfGroups === 0 || activeGroups === 0) {
       this.hide();
@@ -26897,8 +26932,8 @@ Line._linear = function(data) {
   }
   return d;
 };
-function GraphGroup(group, groupId, options, groupsUsingDefaultStyles) {
-  this.id = groupId;
+function GraphGroup(group, groupId2, options, groupsUsingDefaultStyles) {
+  this.id = groupId2;
   var fields = ["sampling", "style", "sort", "yAxisOrientation", "barChart", "drawPoints", "shaded", "interpolation", "zIndex", "excludeFromStacking", "excludeFromLegend"];
   this.options = availableUtils.selectiveBridgeObject(fields, options);
   this.usingDefaultStyle = group.className === void 0;
@@ -30593,8 +30628,8 @@ var ClusterGenerator = class {
               }
               m++;
             }
-            const groupId = this.itemSet.getGroupId(item.data);
-            const group = this.itemSet.groups[groupId] || this.itemSet.groups[ReservedGroupIds.UNGROUPED];
+            const groupId2 = this.itemSet.getGroupId(item.data);
+            const group = this.itemSet.groups[groupId2] || this.itemSet.groups[ReservedGroupIds.UNGROUPED];
             let cluster = this._getClusterForItems(clusterItems, group, oldClusters, options);
             clusters.push(cluster);
             i2 += num;
@@ -31289,9 +31324,9 @@ var ItemSet = class _ItemSet extends Component {
       right = this.body.util.toScreen(range.end);
     }
     const ids = [];
-    for (const groupId in this.groups) {
-      if (!Object.prototype.hasOwnProperty.call(this.groups, groupId)) continue;
-      const group = this.groups[groupId];
+    for (const groupId2 in this.groups) {
+      if (!Object.prototype.hasOwnProperty.call(this.groups, groupId2)) continue;
+      const group = this.groups[groupId2];
       const rawVisibleItems = group.isVisible ? group.visibleItems : [];
       for (const item of rawVisibleItems) {
         if (this.options.rtl) {
@@ -31323,9 +31358,9 @@ var ItemSet = class _ItemSet extends Component {
       right = this.body.util.toScreen(timeOfEvent);
     }
     const ids = [];
-    for (const groupId in this.groups) {
-      if (!Object.prototype.hasOwnProperty.call(this.groups, groupId)) continue;
-      const group = this.groups[groupId];
+    for (const groupId2 in this.groups) {
+      if (!Object.prototype.hasOwnProperty.call(this.groups, groupId2)) continue;
+      const group = this.groups[groupId2];
       const rawVisibleItems = group.isVisible ? group.visibleItems : [];
       for (const item of rawVisibleItems) {
         if (this.options.rtl) {
@@ -31347,10 +31382,10 @@ var ItemSet = class _ItemSet extends Component {
    */
   getVisibleGroups() {
     const ids = [];
-    for (const groupId in this.groups) {
-      if (!Object.prototype.hasOwnProperty.call(this.groups, groupId)) continue;
-      const group = this.groups[groupId];
-      if (group.isVisible) ids.push(groupId);
+    for (const groupId2 in this.groups) {
+      if (!Object.prototype.hasOwnProperty.call(this.groups, groupId2)) continue;
+      const group = this.groups[groupId2];
+      if (group.isVisible) ids.push(groupId2);
     }
     return ids;
   }
@@ -31493,8 +31528,8 @@ var ItemSet = class _ItemSet extends Component {
           if (!Object.prototype.hasOwnProperty.call(this.items, itemId)) continue;
           item = this.items[itemId];
           item.parent && item.parent.remove(item);
-          const groupId = this.getGroupId(item.data);
-          const group = this.groups[groupId];
+          const groupId2 = this.getGroupId(item.data);
+          const group = this.groups[groupId2];
           group && group.add(item) || item.hide();
         }
       }
@@ -31826,11 +31861,11 @@ var ItemSet = class _ItemSet extends Component {
       const changed = !availableUtils.equalArray(groupIds, this.groupIds);
       if (changed) {
         const groups = this.groups;
-        _forEachInstanceProperty(groupIds).call(groupIds, (groupId) => {
-          groups[groupId].hide();
+        _forEachInstanceProperty(groupIds).call(groupIds, (groupId2) => {
+          groups[groupId2].hide();
         });
-        _forEachInstanceProperty(groupIds).call(groupIds, (groupId) => {
-          groups[groupId].show();
+        _forEachInstanceProperty(groupIds).call(groupIds, (groupId2) => {
+          groups[groupId2].show();
         });
         this.groupIds = groupIds;
       }
@@ -31849,14 +31884,14 @@ var ItemSet = class _ItemSet extends Component {
   _orderNestedGroups(groupIds) {
     function getOrderedNestedGroups(t, groupIds2) {
       let result = [];
-      _forEachInstanceProperty(groupIds2).call(groupIds2, (groupId) => {
-        result.push(groupId);
-        const groupData = t.groupsData.get(groupId);
+      _forEachInstanceProperty(groupIds2).call(groupIds2, (groupId2) => {
+        result.push(groupId2);
+        const groupData = t.groupsData.get(groupId2);
         if (groupData.nestedGroups) {
           var _context24;
           const nestedGroupIds = _mapInstanceProperty(_context24 = t.groupsData.get({
             filter(nestedGroup) {
-              return nestedGroup.nestedInGroup == groupId;
+              return nestedGroup.nestedInGroup == groupId2;
             },
             order: t.options.groupOrder
           })).call(_context24, (nestedGroup) => nestedGroup.id);
@@ -31865,7 +31900,7 @@ var ItemSet = class _ItemSet extends Component {
       });
       return result;
     }
-    const topGroupIds = _filterInstanceProperty(groupIds).call(groupIds, (groupId) => !this.groupsData.get(groupId).nestedInGroup);
+    const topGroupIds = _filterInstanceProperty(groupIds).call(groupIds, (groupId2) => !this.groupsData.get(groupId2).nestedInGroup);
     return getOrderedNestedGroups(this, topGroupIds);
   }
   /**
@@ -31875,8 +31910,8 @@ var ItemSet = class _ItemSet extends Component {
    */
   _addItem(item) {
     this.items[item.id] = item;
-    const groupId = this.getGroupId(item.data);
-    const group = this.groups[groupId];
+    const groupId2 = this.getGroupId(item.data);
+    const group = this.groups[groupId2];
     if (!group) {
       item.groupShowing = false;
     } else if (group && group.data && group.data.showNested) {
@@ -31892,8 +31927,8 @@ var ItemSet = class _ItemSet extends Component {
    */
   _updateItem(item, itemData) {
     item.setData(itemData);
-    const groupId = this.getGroupId(item.data);
-    const group = this.groups[groupId];
+    const groupId2 = this.getGroupId(item.data);
+    const group = this.groups[groupId2];
     if (!group) {
       item.groupShowing = false;
     } else if (group && group.data && group.data.showNested) {
@@ -31955,9 +31990,9 @@ var ItemSet = class _ItemSet extends Component {
    * @returns {number} index / groupId
    * @private
    */
-  _getGroupIndex(groupId) {
+  _getGroupIndex(groupId2) {
     for (let i2 = 0; i2 < this.groupIds.length; i2++) {
-      if (groupId == this.groupIds[i2]) return i2;
+      if (groupId2 == this.groupIds[i2]) return i2;
     }
   }
   /**
@@ -32185,8 +32220,8 @@ var ItemSet = class _ItemSet extends Component {
    * @param {string | number} groupId
    * @private
    */
-  _moveToGroup(item, groupId) {
-    const group = this.groups[groupId];
+  _moveToGroup(item, groupId2) {
+    const group = this.groups[groupId2];
     if (group && group.groupId != item.data.group) {
       const oldGroup = item.parent;
       oldGroup.remove(item);
@@ -32784,8 +32819,8 @@ var ItemSet = class _ItemSet extends Component {
       });
     }
     for (let i2 = 0; i2 < groupIds.length; i2++) {
-      const groupId = groupIds[i2];
-      const group = this.groups[groupId];
+      const groupId2 = groupIds[i2];
+      const group = this.groups[groupId2];
       const foreground = group.dom.foreground;
       const foregroundRect = foreground.getBoundingClientRect();
       if (clientY >= foregroundRect.top && clientY < foregroundRect.top + foreground.offsetHeight) {
@@ -33010,8 +33045,8 @@ Legend.prototype.redraw = function() {
     return a < b ? -1 : 1;
   });
   for (var i2 = 0; i2 < groupArray.length; i2++) {
-    var groupId = groupArray[i2];
-    if (this.groups[groupId].visible == true && (this.linegraphOptions.visibility[groupId] === void 0 || this.linegraphOptions.visibility[groupId] == true)) {
+    var groupId2 = groupArray[i2];
+    if (this.groups[groupId2].visible == true && (this.linegraphOptions.visibility[groupId2] === void 0 || this.linegraphOptions.visibility[groupId2] == true)) {
       activeGroups++;
     }
   }
@@ -33055,9 +33090,9 @@ Legend.prototype.redraw = function() {
     }
     var content = "";
     for (i2 = 0; i2 < groupArray.length; i2++) {
-      groupId = groupArray[i2];
-      if (this.groups[groupId].visible == true && (this.linegraphOptions.visibility[groupId] === void 0 || this.linegraphOptions.visibility[groupId] == true)) {
-        content += this.groups[groupId].content + "<br />";
+      groupId2 = groupArray[i2];
+      if (this.groups[groupId2].visible == true && (this.linegraphOptions.visibility[groupId2] === void 0 || this.linegraphOptions.visibility[groupId2] == true)) {
+        content += this.groups[groupId2].content + "<br />";
       }
     }
     this.dom.textArea.innerHTML = availableUtils.xss(content);
@@ -33079,9 +33114,9 @@ Legend.prototype.drawLegendIcons = function() {
     var y = iconOffset + 0.5 * iconHeight + 3;
     this.svg.style.width = iconWidth + 5 + iconOffset + "px";
     for (var i2 = 0; i2 < groupArray.length; i2++) {
-      var groupId = groupArray[i2];
-      if (this.groups[groupId].visible == true && (this.linegraphOptions.visibility[groupId] === void 0 || this.linegraphOptions.visibility[groupId] == true)) {
-        this.groups[groupId].getLegend(iconWidth, iconHeight, this.framework, x, y);
+      var groupId2 = groupArray[i2];
+      if (this.groups[groupId2].visible == true && (this.linegraphOptions.visibility[groupId2] === void 0 || this.linegraphOptions.visibility[groupId2] == true)) {
+        this.groups[groupId2].getLegend(iconWidth, iconHeight, this.framework, x, y);
         y += iconHeight + this.options.iconSpacing;
       }
     }
@@ -33346,41 +33381,41 @@ LineGraph.prototype._onRemoveGroups = function(groupIds) {
     queue: true
   });
 };
-LineGraph.prototype._removeGroup = function(groupId) {
-  if (!Object.prototype.hasOwnProperty.call(this.groups, groupId)) return;
-  if (this.groups[groupId].options.yAxisOrientation == "right") {
-    this.yAxisRight.removeGroup(groupId);
-    this.legendRight.removeGroup(groupId);
+LineGraph.prototype._removeGroup = function(groupId2) {
+  if (!Object.prototype.hasOwnProperty.call(this.groups, groupId2)) return;
+  if (this.groups[groupId2].options.yAxisOrientation == "right") {
+    this.yAxisRight.removeGroup(groupId2);
+    this.legendRight.removeGroup(groupId2);
     this.legendRight.redraw();
   } else {
-    this.yAxisLeft.removeGroup(groupId);
-    this.legendLeft.removeGroup(groupId);
+    this.yAxisLeft.removeGroup(groupId2);
+    this.legendLeft.removeGroup(groupId2);
     this.legendLeft.redraw();
   }
-  delete this.groups[groupId];
+  delete this.groups[groupId2];
 };
-LineGraph.prototype._updateGroup = function(group, groupId) {
-  if (!Object.prototype.hasOwnProperty.call(this.groups, groupId)) {
-    this.groups[groupId] = new GraphGroup(group, groupId, this.options, this.groupsUsingDefaultStyles);
-    if (this.groups[groupId].options.yAxisOrientation == "right") {
-      this.yAxisRight.addGroup(groupId, this.groups[groupId]);
-      this.legendRight.addGroup(groupId, this.groups[groupId]);
+LineGraph.prototype._updateGroup = function(group, groupId2) {
+  if (!Object.prototype.hasOwnProperty.call(this.groups, groupId2)) {
+    this.groups[groupId2] = new GraphGroup(group, groupId2, this.options, this.groupsUsingDefaultStyles);
+    if (this.groups[groupId2].options.yAxisOrientation == "right") {
+      this.yAxisRight.addGroup(groupId2, this.groups[groupId2]);
+      this.legendRight.addGroup(groupId2, this.groups[groupId2]);
     } else {
-      this.yAxisLeft.addGroup(groupId, this.groups[groupId]);
-      this.legendLeft.addGroup(groupId, this.groups[groupId]);
+      this.yAxisLeft.addGroup(groupId2, this.groups[groupId2]);
+      this.legendLeft.addGroup(groupId2, this.groups[groupId2]);
     }
   } else {
-    this.groups[groupId].update(group);
-    if (this.groups[groupId].options.yAxisOrientation == "right") {
-      this.yAxisRight.updateGroup(groupId, this.groups[groupId]);
-      this.legendRight.updateGroup(groupId, this.groups[groupId]);
-      this.yAxisLeft.removeGroup(groupId);
-      this.legendLeft.removeGroup(groupId);
+    this.groups[groupId2].update(group);
+    if (this.groups[groupId2].options.yAxisOrientation == "right") {
+      this.yAxisRight.updateGroup(groupId2, this.groups[groupId2]);
+      this.legendRight.updateGroup(groupId2, this.groups[groupId2]);
+      this.yAxisLeft.removeGroup(groupId2);
+      this.legendLeft.removeGroup(groupId2);
     } else {
-      this.yAxisLeft.updateGroup(groupId, this.groups[groupId]);
-      this.legendLeft.updateGroup(groupId, this.groups[groupId]);
-      this.yAxisRight.removeGroup(groupId);
-      this.legendRight.removeGroup(groupId);
+      this.yAxisLeft.updateGroup(groupId2, this.groups[groupId2]);
+      this.legendLeft.updateGroup(groupId2, this.groups[groupId2]);
+      this.yAxisRight.removeGroup(groupId2);
+      this.legendRight.removeGroup(groupId2);
     }
   }
   this.legendLeft.redraw();
@@ -33400,38 +33435,38 @@ LineGraph.prototype._updateAllGroupData = function(ids, groupIds) {
     var groupCounts = {};
     for (var i2 = 0; i2 < items.length; i2++) {
       var item = items[i2];
-      var groupId = item.group;
-      if (groupId === null || groupId === void 0) {
-        groupId = UNGROUPED;
+      var groupId2 = item.group;
+      if (groupId2 === null || groupId2 === void 0) {
+        groupId2 = UNGROUPED;
       }
-      Object.prototype.hasOwnProperty.call(groupCounts, groupId) ? groupCounts[groupId]++ : groupCounts[groupId] = 1;
+      Object.prototype.hasOwnProperty.call(groupCounts, groupId2) ? groupCounts[groupId2]++ : groupCounts[groupId2] = 1;
     }
     var existingItemsMap = {};
     if (!groupIds && ids) {
-      for (groupId in this.groups) {
-        if (!Object.prototype.hasOwnProperty.call(this.groups, groupId)) continue;
-        group = this.groups[groupId];
+      for (groupId2 in this.groups) {
+        if (!Object.prototype.hasOwnProperty.call(this.groups, groupId2)) continue;
+        group = this.groups[groupId2];
         var existing_items = group.getItems();
-        groupsContent[groupId] = _filterInstanceProperty(existing_items).call(existing_items, function(item2) {
+        groupsContent[groupId2] = _filterInstanceProperty(existing_items).call(existing_items, function(item2) {
           existingItemsMap[item2[fieldId]] = item2[fieldId];
           return item2[fieldId] !== idMap[item2[fieldId]];
         });
-        var newLength = groupCounts[groupId];
-        groupCounts[groupId] -= groupsContent[groupId].length;
-        if (groupsContent[groupId].length < newLength) groupsContent[groupId][newLength - 1] = {};
+        var newLength = groupCounts[groupId2];
+        groupCounts[groupId2] -= groupsContent[groupId2].length;
+        if (groupsContent[groupId2].length < newLength) groupsContent[groupId2][newLength - 1] = {};
       }
     }
     for (i2 = 0; i2 < items.length; i2++) {
       item = items[i2];
-      groupId = item.group;
-      if (groupId === null || groupId === void 0) {
-        groupId = UNGROUPED;
+      groupId2 = item.group;
+      if (groupId2 === null || groupId2 === void 0) {
+        groupId2 = UNGROUPED;
       }
       if (!groupIds && ids && item[fieldId] !== idMap[item[fieldId]] && Object.prototype.hasOwnProperty.call(existingItemsMap, item[fieldId])) {
         continue;
       }
-      if (!Object.prototype.hasOwnProperty.call(groupsContent, groupId)) {
-        groupsContent[groupId] = new Array(groupCounts[groupId]);
+      if (!Object.prototype.hasOwnProperty.call(groupsContent, groupId2)) {
+        groupsContent[groupId2] = new Array(groupCounts[groupId2]);
       }
       var extended = availableUtils.bridgeObject(item);
       extended.x = availableUtils.convert(item.x, "Date");
@@ -33439,32 +33474,32 @@ LineGraph.prototype._updateAllGroupData = function(ids, groupIds) {
       extended.orginalY = item.y;
       extended.y = Number(item.y);
       extended[fieldId] = item[fieldId];
-      var index = groupsContent[groupId].length - groupCounts[groupId]--;
-      groupsContent[groupId][index] = extended;
+      var index = groupsContent[groupId2].length - groupCounts[groupId2]--;
+      groupsContent[groupId2][index] = extended;
     }
-    for (groupId in this.groups) {
-      if (!Object.prototype.hasOwnProperty.call(this.groups, groupId) || Object.prototype.hasOwnProperty.call(groupsContent, groupId)) continue;
-      groupsContent[groupId] = new Array(0);
+    for (groupId2 in this.groups) {
+      if (!Object.prototype.hasOwnProperty.call(this.groups, groupId2) || Object.prototype.hasOwnProperty.call(groupsContent, groupId2)) continue;
+      groupsContent[groupId2] = new Array(0);
     }
-    for (groupId in groupsContent) {
-      if (!Object.prototype.hasOwnProperty.call(groupsContent, groupId)) continue;
-      if (groupsContent[groupId].length == 0) {
-        if (Object.prototype.hasOwnProperty.call(this.groups, groupId)) {
-          this._removeGroup(groupId);
+    for (groupId2 in groupsContent) {
+      if (!Object.prototype.hasOwnProperty.call(groupsContent, groupId2)) continue;
+      if (groupsContent[groupId2].length == 0) {
+        if (Object.prototype.hasOwnProperty.call(this.groups, groupId2)) {
+          this._removeGroup(groupId2);
         }
       } else {
         var group = void 0;
         if (this.groupsData != void 0) {
-          group = this.groupsData.get(groupId);
+          group = this.groupsData.get(groupId2);
         }
         if (group == void 0) {
           group = {
-            id: groupId,
-            content: this.options.defaultGroup + groupId
+            id: groupId2,
+            content: this.options.defaultGroup + groupId2
           };
         }
-        this._updateGroup(group, groupId);
-        this.groups[groupId].setItems(groupsContent[groupId]);
+        this._updateGroup(group, groupId2);
+        this.groups[groupId2].setItems(groupsContent[groupId2]);
       }
     }
     this.forceGraphUpdate = true;
@@ -33520,12 +33555,12 @@ LineGraph.prototype.redraw = function() {
 };
 LineGraph.prototype._getSortedGroupIds = function() {
   var grouplist = [];
-  for (var groupId in this.groups) {
-    if (Object.prototype.hasOwnProperty.call(this.groups, groupId)) {
-      var group = this.groups[groupId];
-      if (group.visible == true && (this.options.groups.visibility[groupId] === void 0 || this.options.groups.visibility[groupId] == true)) {
+  for (var groupId2 in this.groups) {
+    if (Object.prototype.hasOwnProperty.call(this.groups, groupId2)) {
+      var group = this.groups[groupId2];
+      if (group.visible == true && (this.options.groups.visibility[groupId2] === void 0 || this.options.groups.visibility[groupId2] == true)) {
         grouplist.push({
-          id: groupId,
+          id: groupId2,
           zIndex: group.options.zIndex
         });
       }
@@ -38594,22 +38629,22 @@ Graph2d.prototype.setGroups = function(groups) {
   this.groupsData = newDataSet;
   this.linegraph.setGroups(newDataSet);
 };
-Graph2d.prototype.getLegend = function(groupId, width, height) {
+Graph2d.prototype.getLegend = function(groupId2, width, height) {
   if (width === void 0) {
     width = 15;
   }
   if (height === void 0) {
     height = 15;
   }
-  if (this.linegraph.groups[groupId] !== void 0) {
-    return this.linegraph.groups[groupId].getLegend(width, height);
+  if (this.linegraph.groups[groupId2] !== void 0) {
+    return this.linegraph.groups[groupId2].getLegend(width, height);
   } else {
-    return "cannot find group:'" + groupId + "'";
+    return "cannot find group:'" + groupId2 + "'";
   }
 };
-Graph2d.prototype.isGroupVisible = function(groupId) {
-  if (this.linegraph.groups[groupId] !== void 0) {
-    return this.linegraph.groups[groupId].visible && (this.linegraph.options.groups.visibility[groupId] === void 0 || this.linegraph.options.groups.visibility[groupId] == true);
+Graph2d.prototype.isGroupVisible = function(groupId2) {
+  if (this.linegraph.groups[groupId2] !== void 0) {
+    return this.linegraph.groups[groupId2].visible && (this.linegraph.options.groups.visibility[groupId2] === void 0 || this.linegraph.options.groups.visibility[groupId2] == true);
   } else {
     return false;
   }
@@ -38617,10 +38652,10 @@ Graph2d.prototype.isGroupVisible = function(groupId) {
 Graph2d.prototype.getDataRange = function() {
   var min = null;
   var max = null;
-  for (var groupId in this.linegraph.groups) {
-    if (!Object.prototype.hasOwnProperty.call(this.linegraph.groups, groupId) || this.linegraph.groups[groupId].visible !== true) continue;
-    for (var i2 = 0; i2 < this.linegraph.groups[groupId].itemsData.length; i2++) {
-      var item = this.linegraph.groups[groupId].itemsData[i2];
+  for (var groupId2 in this.linegraph.groups) {
+    if (!Object.prototype.hasOwnProperty.call(this.linegraph.groups, groupId2) || this.linegraph.groups[groupId2].visible !== true) continue;
+    for (var i2 = 0; i2 < this.linegraph.groups[groupId2].itemsData.length; i2++) {
+      var item = this.linegraph.groups[groupId2].itemsData[i2];
       var value = availableUtils.convert(item.x, "Date").valueOf();
       min = min == null ? value : min > value ? value : min;
       max = max == null ? value : max < value ? value : max;
@@ -40205,13 +40240,17 @@ function reconstructHistorySegments(options) {
       });
     }
   } else {
+    let previousVisible = false;
     coalescedChanges.forEach((change, index) => {
       const level2 = resolveLevel(change.value, options, issues, change.sourceIndex);
       if (index === coalescedChanges.length - 1) {
         currentValue = change.value;
         currentLevel = level2;
       }
-      if (level2 === 0) return;
+      if (level2 === 0) {
+        previousVisible = false;
+        return;
+      }
       segments.push({
         start: change.date,
         end: coalescedChanges[index + 1]?.date ?? today,
@@ -40219,8 +40258,10 @@ function reconstructHistorySegments(options) {
         level: level2,
         color: resolveColor(level2, change.value, options, issues, change.sourceIndex),
         implicit: false,
-        sourceIndex: change.sourceIndex
+        sourceIndex: change.sourceIndex,
+        connectsFromPrevious: previousVisible
       });
+      previousVisible = true;
     });
   }
   return {
@@ -40615,12 +40656,23 @@ function compareRows(first, second, dashboard) {
   const direction = dashboard.sortAscending ? 1 : -1;
   return comparison * direction || compareText(first.file.basename, second.file.basename);
 }
-function rowGroupValue(row, dashboard) {
-  if (dashboard.groupBy === "folder") return row.file.parent?.path || "Vault root";
-  if (dashboard.groupBy === "level") return `Level ${row.level}`;
+function rowGroupValues(row, dashboard) {
+  if (dashboard.groupBy === "folder") return [row.file.parent?.path || "Vault root"];
+  if (dashboard.groupBy === "level") return [`Level ${row.level}`];
+  if (dashboard.groupBy === "file.tags") return row.fileTags.length > 0 ? row.fileTags : ["No value"];
   const propertyKey = propertyKeyFromMode(dashboard.groupBy);
-  if (propertyKey) return displayPropertyValue(row.frontmatter[propertyKey]) || "Unset";
-  return "";
+  if (propertyKey) {
+    const value = row.frontmatter[propertyKey];
+    const values2 = Array.isArray(value) ? value.flatMap((item) => {
+      const display = displayPropertyValue(item);
+      return display ? [display] : [];
+    }) : displayPropertyValue(value) ? [displayPropertyValue(value)] : [];
+    return values2.length > 0 ? values2 : ["No value"];
+  }
+  return [""];
+}
+function groupId(kind, value) {
+  return `${kind}:${encodeURIComponent(value)}`;
 }
 function addDays2(date2, days) {
   const next = new Date(date2);
@@ -40750,17 +40802,22 @@ var DashboardTimeline = class {
   }
   async render() {
     const token = ++this.renderToken;
-    const dashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
-    if (!dashboard) {
+    const savedDashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
+    if (!savedDashboard) {
       this.destroyTimeline();
       this.containerEl.empty();
       this.containerEl.addClass("property-logs-dashboard");
       this.renderNoDashboard();
       return;
     }
-    this.dashboardId = dashboard.id;
+    this.dashboardId = savedDashboard.id;
+    const dashboard = this.resolveDashboard(savedDashboard);
     if (this.canUpdateInPlace(dashboard) && this.updateInPlace(token, dashboard)) return;
     await this.renderFull(token, dashboard);
+  }
+  /** Applies block-local presentation choices without ever mutating saved settings. */
+  resolveDashboard(dashboard) {
+    return { ...dashboard, ...this.options.dashboardOverrides };
   }
   /** Tears the dashboard down and builds it again, skeleton and all. */
   async renderFull(token, dashboard) {
@@ -40845,7 +40902,8 @@ var DashboardTimeline = class {
       String(this.options.compact === true),
       String(this.options.minimal === true),
       String(this.options.showToolbar === false),
-      String(this.options.maxHeight ?? "")
+      String(this.options.maxHeight ?? ""),
+      String(this.options.scroll ?? "auto")
     ].join("|");
   }
   renderHeader(header, dashboard, files) {
@@ -40902,7 +40960,8 @@ var DashboardTimeline = class {
     const cache = this.host.getDataCache();
     return files.flatMap((file) => {
       const row = cache.forFile("row", file, parseKey, () => {
-        const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+        const cacheEntry = this.app.metadataCache.getFileCache(file);
+        const frontmatter = cacheEntry?.frontmatter;
         const metadata = frontmatter ?? {};
         const history = collectCompatibleHistory(metadata, historyKey, dateKey);
         const parsed = reconstructHistorySegments({
@@ -40925,6 +40984,7 @@ var DashboardTimeline = class {
         return {
           file,
           frontmatter: metadata,
+          fileTags: (cacheEntry?.tags ?? []).map((tag) => tag.tag),
           history,
           parsed,
           level: parsed.currentLevel,
@@ -40987,7 +41047,7 @@ var DashboardTimeline = class {
       return;
     }
     if (unchanged) return;
-    const current = this.host.getDashboard(this.dashboardId) ?? dashboard;
+    const current = this.resolveDashboard(this.host.getDashboard(this.dashboardId) ?? dashboard);
     const files = this.host.getDashboardFiles(current);
     const model = this.buildModel(this.buildRows(current, files), current);
     this.addJournalItems(model, notes, current);
@@ -41095,6 +41155,7 @@ var DashboardTimeline = class {
       ["none", "No grouping"],
       ["folder", "Folder"],
       ["level", "Current level"],
+      ["file.tags", "File tags"],
       ...properties.map((property) => [`property:${property}`, property])
     ], async (value) => {
       dashboard.groupBy = value;
@@ -41257,12 +41318,12 @@ var DashboardTimeline = class {
     );
   }
   // ─── Timeline ──────────────────────────────────────────────────────────────
-  isFolded(dashboard, groupId) {
-    return dashboard.foldedGroups.includes(groupId);
+  isFolded(dashboard, groupId2) {
+    return dashboard.foldedGroups.includes(groupId2);
   }
-  async toggleFold(dashboard, groupId) {
+  async toggleFold(dashboard, groupId2) {
     dashboard = this.host.getDashboard(this.dashboardId) ?? dashboard;
-    dashboard.foldedGroups = this.isFolded(dashboard, groupId) ? dashboard.foldedGroups.filter((id) => id !== groupId) : [...dashboard.foldedGroups, groupId];
+    dashboard.foldedGroups = this.isFolded(dashboard, groupId2) ? dashboard.foldedGroups.filter((id) => id !== groupId2) : [...dashboard.foldedGroups, groupId2];
     await this.host.save();
     this.refresh();
   }
@@ -41298,22 +41359,22 @@ var DashboardTimeline = class {
         });
       });
       Array.from(statusBuckets.entries()).sort(([firstStatus, first], [secondStatus, second]) => first.level - second.level || compareText(firstStatus, secondStatus)).forEach(([status, bucket], order) => {
-        const groupId = `status:${status}`;
+        const groupId2 = `status:${status}`;
         const foldable = bucket.notes.size > 1;
-        const folded = foldable && this.isFolded(dashboard, groupId);
+        const folded = foldable && this.isFolded(dashboard, groupId2);
         const noteCount = bucket.notes.size;
-        model.groupLabelText.set(groupId, status);
+        model.groupLabelText.set(groupId2, status);
         model.groups.push({
-          id: groupId,
+          id: groupId2,
           props: {
-            id: groupId,
+            id: groupId2,
             className: folded ? "property-logs-status-group is-folded" : "property-logs-status-group",
             order
           },
           contentKey: `status|${status}|${noteCount}|${foldable}|${folded}`,
           createContent: () => this.createGroupLabel(
             dashboard,
-            groupId,
+            groupId2,
             this.createStatusLabel(status, noteCount),
             foldable
           )
@@ -41323,78 +41384,119 @@ var DashboardTimeline = class {
           bucket.segments.forEach(({ row, segment, segmentIndex }) => {
             this.tallySegment(tallies, row, segment, segmentIndex);
           });
-          this.planDayCounts(model, groupId, tallies);
+          this.planDayCounts(model, groupId2, tallies);
           return;
         }
         bucket.segments.forEach(({ row, segment, segmentIndex }) => {
-          this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId);
+          this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId2);
+        });
+      });
+    } else if (dashboard.groupBy === "none") {
+      const buckets = /* @__PURE__ */ new Map();
+      let order = 0;
+      sortedRows.forEach((row) => {
+        const groupId2 = `note:${row.file.path}`;
+        model.noteGroupIds.set(row.file.path, groupId2);
+        model.groupLabelText.set(groupId2, row.file.basename);
+        model.groups.push({
+          id: groupId2,
+          props: {
+            id: groupId2,
+            className: row.parsed.malformed ? "property-logs-row-malformed" : "property-logs-row",
+            order: order++
+          },
+          contentKey: this.rowLabelKey(row, dashboard),
+          createContent: () => this.createRowLabel(row, dashboard)
+        });
+        row.parsed.segments.forEach((segment, segmentIndex) => {
+          this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId2);
         });
       });
     } else {
-      const buckets = /* @__PURE__ */ new Map();
-      if (dashboard.groupBy === "none") {
-        buckets.set("", sortedRows);
-      } else {
-        sortedRows.forEach((row) => {
-          const key = rowGroupValue(row, dashboard);
-          const bucket = buckets.get(key) ?? [];
+      const outerBuckets = /* @__PURE__ */ new Map();
+      sortedRows.forEach((row) => {
+        rowGroupValues(row, dashboard).forEach((value) => {
+          const bucket = outerBuckets.get(value) ?? [];
           bucket.push(row);
-          buckets.set(key, bucket);
+          outerBuckets.set(value, bucket);
         });
-      }
+      });
       let order = 0;
-      Array.from(buckets.entries()).sort(([first], [second]) => compareText(first, second)).forEach(([bucket, bucketRows]) => {
-        const parentId = `bucket:${bucket}`;
-        const foldable = dashboard.groupBy !== "none" && bucketRows.length > 1;
-        const folded = foldable && this.isFolded(dashboard, parentId);
-        if (dashboard.groupBy !== "none") {
-          const count = bucketRows.length;
-          model.groupLabelText.set(parentId, bucket || "All notes");
-          model.groups.push({
+      Array.from(outerBuckets.entries()).sort(([first], [second]) => compareText(first, second)).forEach(([outerValue, bucketRows]) => {
+        const parentId = groupId("bucket", outerValue);
+        const parentFolded = this.isFolded(dashboard, parentId);
+        const statusBuckets = /* @__PURE__ */ new Map();
+        bucketRows.forEach((row) => row.parsed.segments.forEach((segment, segmentIndex) => {
+          const status = segment.value ?? "No value";
+          const bucket = statusBuckets.get(status) ?? {
+            level: segment.level,
+            notes: /* @__PURE__ */ new Set(),
+            segments: []
+          };
+          bucket.level = Math.max(bucket.level, segment.level);
+          bucket.notes.add(row.file.path);
+          bucket.segments.push({ row, segment, segmentIndex });
+          statusBuckets.set(status, bucket);
+        }));
+        const statuses = Array.from(statusBuckets.entries()).sort(([firstStatus, first], [secondStatus, second]) => first.level - second.level || compareText(firstStatus, secondStatus));
+        const parentFoldable = bucketRows.length > 1 || statuses.length > 1;
+        const childIds = statuses.map(([status]) => groupId(`${parentId}:status`, status));
+        model.groupLabelText.set(parentId, outerValue);
+        model.groups.push({
+          id: parentId,
+          props: {
             id: parentId,
-            props: {
-              id: parentId,
-              nestedGroups: folded ? void 0 : bucketRows.map((row) => `note:${row.file.path}`),
-              showNested: folded ? void 0 : true,
-              className: folded ? "property-logs-group-header is-folded" : "property-logs-group-header",
-              order: order++
-            },
-            contentKey: `bucket|${bucket}|${count}|${foldable}|${folded}`,
-            createContent: () => this.createGroupLabel(
-              dashboard,
-              parentId,
-              this.createBucketLabel(bucket, count),
-              foldable
-            )
-          });
-        }
-        if (folded) {
+            nestedGroups: parentFolded ? void 0 : childIds,
+            showNested: parentFolded ? void 0 : true,
+            className: parentFolded ? "property-logs-group-header is-folded" : "property-logs-group-header",
+            order: order++
+          },
+          contentKey: `outer|${outerValue}|${bucketRows.length}|${parentFoldable}|${parentFolded}`,
+          createContent: () => this.createGroupLabel(
+            dashboard,
+            parentId,
+            this.createBucketLabel(outerValue, bucketRows.length),
+            parentFoldable
+          )
+        });
+        if (parentFolded) {
           const tallies = /* @__PURE__ */ new Map();
-          bucketRows.forEach((row) => {
-            model.noteGroupIds.set(row.file.path, parentId);
-            row.parsed.segments.forEach((segment, segmentIndex) => {
-              this.tallySegment(tallies, row, segment, segmentIndex);
-            });
-          });
+          bucketRows.forEach((row) => row.parsed.segments.forEach((segment, segmentIndex) => {
+            this.tallySegment(tallies, row, segment, segmentIndex);
+          }));
           this.planDayCounts(model, parentId, tallies);
           return;
         }
-        bucketRows.forEach((row) => {
-          const groupId = `note:${row.file.path}`;
-          model.noteGroupIds.set(row.file.path, groupId);
-          model.groupLabelText.set(groupId, row.file.basename);
+        statuses.forEach(([status, statusBucket], index) => {
+          const childId = childIds[index];
+          const childFoldable = statusBucket.notes.size > 1;
+          const childFolded = childFoldable && this.isFolded(dashboard, childId);
+          model.groupLabelText.set(childId, status);
           model.groups.push({
-            id: groupId,
+            id: childId,
             props: {
-              id: groupId,
-              className: row.parsed.malformed ? "property-logs-row-malformed" : "property-logs-row",
+              id: childId,
+              className: childFolded ? "property-logs-status-group is-folded" : "property-logs-status-group",
               order: order++
             },
-            contentKey: this.rowLabelKey(row, dashboard),
-            createContent: () => this.createRowLabel(row, dashboard)
+            contentKey: `nested-status|${outerValue}|${status}|${statusBucket.notes.size}|${childFoldable}|${childFolded}`,
+            createContent: () => this.createGroupLabel(
+              dashboard,
+              childId,
+              this.createStatusLabel(status, statusBucket.notes.size),
+              childFoldable
+            )
           });
-          row.parsed.segments.forEach((segment, segmentIndex) => {
-            this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId);
+          if (childFolded) {
+            const tallies = /* @__PURE__ */ new Map();
+            statusBucket.segments.forEach(({ row, segment, segmentIndex }) => {
+              this.tallySegment(tallies, row, segment, segmentIndex);
+            });
+            this.planDayCounts(model, childId, tallies);
+            return;
+          }
+          statusBucket.segments.forEach(({ row, segment, segmentIndex }) => {
+            this.planSegmentItem(model, row, dashboard, segment, segmentIndex, childId);
           });
         });
       });
@@ -41560,7 +41662,7 @@ var DashboardTimeline = class {
       showMinorLabels: !showAxis,
       showMajorLabels: !showAxis,
       horizontalScroll: !compact && !import_obsidian9.Platform.isMobile,
-      verticalScroll: true,
+      verticalScroll: this.options.scroll !== false,
       moveable: interactive,
       zoomable: import_obsidian9.Platform.isMobile && interactive,
       zoomMin: 1e3 * 60 * 60 * 24 * 7,
@@ -41575,8 +41677,9 @@ var DashboardTimeline = class {
       start: visible.start,
       end: visible.end
     };
-    if (compact) options.maxHeight = this.options.maxHeight ?? (minimal ? 220 : 420);
-    else options.height = "100%";
+    if (compact && this.options.scroll !== false) {
+      options.maxHeight = this.options.maxHeight ?? (minimal ? 220 : 420);
+    } else options.height = "100%";
     return options;
   }
   observeResize(wrapper, timeline) {
@@ -41626,7 +41729,10 @@ var DashboardTimeline = class {
     const items = this.timelineEl.querySelectorAll(
       ".vis-foreground .vis-item.property-logs-segment"
     );
-    if (items.length === 0) return;
+    if (items.length === 0) {
+      this.syncTransitionArrows();
+      return;
+    }
     const measured = [];
     items.forEach((item) => {
       const content = item.querySelector(":scope > .vis-item-overflow > .vis-item-content");
@@ -41650,6 +41756,86 @@ var DashboardTimeline = class {
       item.style.setProperty("--property-logs-line-start", `${start}px`);
       item.style.setProperty("--property-logs-line-end", `${end}px`);
     });
+    this.syncTransitionArrows();
+  }
+  /**
+   * Connects consecutive visible values of one note across their rows. CSS can
+   * draw a segment's own horizontal line, but a change from Backlog to Active
+   * crosses DOM rows, so it needs this lightweight SVG overlay.
+   */
+  syncTransitionArrows() {
+    if (!this.timelineEl) return;
+    this.timelineEl.querySelector(".property-logs-transition-arrows")?.remove();
+    const anchors = Array.from(this.timelineEl.querySelectorAll(
+      ".vis-foreground .property-logs-segment-button[data-transition-note]"
+    ));
+    if (anchors.length < 2) return;
+    const timelineBounds = this.timelineEl.getBoundingClientRect();
+    if (timelineBounds.width <= 0 || timelineBounds.height <= 0) return;
+    const byNoteAndScope = /* @__PURE__ */ new Map();
+    anchors.forEach((anchor) => {
+      const note = anchor.dataset.transitionNote;
+      const scope = anchor.dataset.transitionScope;
+      const index = Number(anchor.dataset.transitionIndex);
+      if (!note || !scope || !Number.isInteger(index)) return;
+      const key = `${note}\0${scope}`;
+      const entries2 = byNoteAndScope.get(key) ?? /* @__PURE__ */ new Map();
+      entries2.set(index, anchor);
+      byNoteAndScope.set(key, entries2);
+    });
+    const paths = [];
+    byNoteAndScope.forEach((entries2) => {
+      entries2.forEach((end, index) => {
+        if (end.dataset.connectsFromPrevious !== "true") return;
+        const start = entries2.get(index - 1);
+        if (start) paths.push({ start, end });
+      });
+    });
+    if (paths.length === 0) return;
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.classList.add("property-logs-transition-arrows");
+    svg.setAttribute("width", String(this.timelineEl.clientWidth));
+    svg.setAttribute("height", String(this.timelineEl.clientHeight));
+    svg.setAttribute("viewBox", `0 0 ${this.timelineEl.clientWidth} ${this.timelineEl.clientHeight}`);
+    const defs = document.createElementNS(ns, "defs");
+    const marker = document.createElementNS(ns, "marker");
+    marker.setAttribute("id", "property-logs-transition-arrowhead");
+    marker.setAttribute("viewBox", "0 0 6 6");
+    marker.setAttribute("refX", "5");
+    marker.setAttribute("refY", "3");
+    marker.setAttribute("markerWidth", "5");
+    marker.setAttribute("markerHeight", "5");
+    marker.setAttribute("orient", "auto");
+    const head = document.createElementNS(ns, "path");
+    head.setAttribute("d", "M 0 0 L 6 3 L 0 6 z");
+    head.setAttribute("class", "property-logs-transition-arrowhead");
+    marker.appendChild(head);
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+    paths.forEach(({ start, end }) => {
+      const startItem = start.closest(".vis-item.property-logs-segment");
+      const endItem = end.closest(".vis-item.property-logs-segment");
+      if (!startItem || !endItem) return;
+      const startBounds = startItem.getBoundingClientRect();
+      const endBounds = endItem.getBoundingClientRect();
+      const lineEnd = Number.parseFloat(startItem.style.getPropertyValue("--property-logs-line-end"));
+      const lineStart = Number.parseFloat(endItem.style.getPropertyValue("--property-logs-line-start"));
+      if (!Number.isFinite(lineEnd) || !Number.isFinite(lineStart)) return;
+      const startX = startBounds.left - timelineBounds.left + lineEnd;
+      const startY = startBounds.top - timelineBounds.top + startBounds.height / 2;
+      const endX = endBounds.left - timelineBounds.left + lineStart;
+      const endY = endBounds.top - timelineBounds.top + endBounds.height / 2;
+      const bend = Math.max(8, Math.min(32, Math.abs(endX - startX) / 2));
+      const path2 = document.createElementNS(ns, "path");
+      path2.setAttribute("d", `M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`);
+      path2.setAttribute("class", "property-logs-transition-arrow");
+      path2.setAttribute("marker-end", "url(#property-logs-transition-arrowhead)");
+      const color = endItem.style.getPropertyValue("--property-logs-segment-color").trim();
+      if (color) path2.style.stroke = color;
+      svg.appendChild(path2);
+    });
+    if (svg.childElementCount > 1) this.timelineEl.appendChild(svg);
   }
   updateAxis(immediate = false) {
     if (!this.timeline || !this.axis || !this.timelineEl) return;
@@ -41694,14 +41880,14 @@ var DashboardTimeline = class {
    * unless it is asked to stack, so days that crowd together at a wide zoom
    * overlap instead of growing the row.
    */
-  planDayCounts(model, groupId, tallies) {
+  planDayCounts(model, groupId2, tallies) {
     tallies.forEach((tally, day) => {
-      const id = `${groupId}\0count:${day}`;
+      const id = `${groupId2}\0count:${day}`;
       model.items.push({
         id,
         props: {
           id,
-          group: groupId,
+          group: groupId2,
           subgroup: DAY_COUNT_SUBGROUP,
           start: middayOf(day),
           type: "point",
@@ -41728,17 +41914,18 @@ var DashboardTimeline = class {
     ].join("\n"));
     return badge;
   }
-  planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId) {
+  planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId2) {
     const id = `${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`;
     const isCurrent = isOngoingSegment(row, segmentIndex);
     const startedToday = localDate(segment.start) === localDate(/* @__PURE__ */ new Date());
     const end = segment.end.getTime() > segment.start.getTime() ? segment.end : addDays2(segment.start, isCurrent && startedToday ? CURRENT_TODAY_OVERFLOW_DAYS : 1);
     const className = `property-logs-segment${isCurrent ? " is-ongoing" : ""}`;
+    const transitionScope = groupId2.startsWith("status:") ? "status" : groupId2.includes(":status:") ? groupId2.slice(0, groupId2.lastIndexOf(":status:")) : groupId2;
     model.items.push({
       id,
       props: {
         id,
-        group: groupId,
+        group: groupId2,
         start: segment.start,
         end,
         type: "range",
@@ -41759,7 +41946,14 @@ var DashboardTimeline = class {
         dashboard.rowProperties.join(","),
         dashboard.noteOpenGesture
       ].join("|"),
-      createContent: () => this.createSegmentContent(row, dashboard, segment)
+      createContent: () => this.createSegmentContent(
+        row,
+        dashboard,
+        segment,
+        segmentIndex,
+        transitionScope,
+        groupId2
+      )
     });
     model.itemRows.set(id, row);
   }
@@ -41783,8 +41977,8 @@ var DashboardTimeline = class {
     notes.forEach((note) => {
       const style = markerStyle(markers, note.marker);
       const targetGroup = this.resolveJournalGroup(note, model.noteGroupIds);
-      const groupId = targetGroup && !this.isFolded(dashboard, targetGroup) ? targetGroup : laneId;
-      if (groupId === laneId) {
+      const groupId2 = targetGroup && !this.isFolded(dashboard, targetGroup) ? targetGroup : laneId;
+      if (groupId2 === laneId) {
         laneCount++;
         if (laneFolded) {
           this.tallyDay(
@@ -41800,7 +41994,7 @@ var DashboardTimeline = class {
         id: note.id,
         props: {
           id: note.id,
-          group: groupId,
+          group: groupId2,
           start: centerOf(note.range),
           type: "point",
           selectable: false,
@@ -41865,8 +42059,8 @@ var DashboardTimeline = class {
     for (const link of note.links) {
       const target = this.app.metadataCache.getFirstLinkpathDest(link, note.file.path);
       if (!target) continue;
-      const groupId = noteGroupIds.get(target.path);
-      if (groupId) return groupId;
+      const groupId2 = noteGroupIds.get(target.path);
+      if (groupId2) return groupId2;
     }
     return null;
   }
@@ -41929,17 +42123,17 @@ ${note.file.basename}`
     return label;
   }
   /** Wraps a group label with the fold toggle that collapses it into one row. */
-  createGroupLabel(dashboard, groupId, content, foldable) {
+  createGroupLabel(dashboard, groupId2, content, foldable) {
     if (!foldable) {
       const plain = document.createElement("div");
       plain.className = "property-logs-group-label is-static";
       plain.appendChild(content);
       return plain;
     }
-    const folded = this.isFolded(dashboard, groupId);
+    const folded = this.isFolded(dashboard, groupId2);
     const wrapper = document.createElement("div");
     wrapper.className = folded ? "property-logs-group-label is-folded" : "property-logs-group-label";
-    wrapper.dataset.foldableGroup = groupId;
+    wrapper.dataset.foldableGroup = groupId2;
     const toggle = wrapper.createEl("button", {
       cls: "property-logs-fold-toggle",
       attr: { type: "button", "aria-expanded": String(!folded) }
@@ -41949,15 +42143,20 @@ ${note.file.basename}`
     toggle.addEventListener("click", (event2) => {
       event2.preventDefault();
       event2.stopPropagation();
-      void this.toggleFold(dashboard, groupId);
+      void this.toggleFold(dashboard, groupId2);
     });
     wrapper.appendChild(content);
     return wrapper;
   }
-  createSegmentContent(row, dashboard, segment) {
+  createSegmentContent(row, dashboard, segment, segmentIndex, transitionScope, groupId2) {
     const content = document.createElement("button");
     content.type = "button";
     content.className = "property-logs-segment-button";
+    content.dataset.transitionNote = row.file.path;
+    content.dataset.transitionIndex = String(segmentIndex);
+    content.dataset.transitionScope = transitionScope;
+    content.dataset.transitionGroup = groupId2;
+    content.dataset.connectsFromPrevious = String(segment.connectsFromPrevious === true);
     const primaryAction = dashboard.noteOpenGesture === "click" ? "Click to open note; Ctrl-click to change value." : "Click to change value; Ctrl-click to open note.";
     content.createSpan({ text: row.file.basename, cls: "property-logs-segment-title" });
     const meta = [];
@@ -42190,7 +42389,13 @@ var DashboardEmbed = class extends import_obsidian10.MarkdownRenderChild {
       minimal: options.minimal,
       showToolbar: options.minimal ? false : options.header,
       maxHeight: options.height,
-      windowDays: options.windowDays
+      windowDays: options.windowDays,
+      scroll: options.scroll,
+      dashboardOverrides: {
+        groupBy: options.groupBy ?? void 0,
+        sortBy: options.sortBy ?? void 0,
+        sortAscending: options.sortAscending ?? void 0
+      }
     });
     this.timeline.setDashboardId(dashboard.id);
     this.timeline.setFocus(context ? {
@@ -43405,7 +43610,8 @@ var StatusHistorySettingTab = class extends import_obsidian12.PluginSettingTab {
       { id: "dashboards", label: "Dashboards" },
       { id: "values", label: "Values" },
       { id: "periodic", label: "Periodic Notes" },
-      { id: "chart", label: "Chart Defaults" }
+      { id: "chart", label: "Chart Defaults" },
+      { id: "about", label: "About" }
     ];
     const navEl = containerEl.createDiv({ cls: "status-history-tabs-nav" });
     const contentEl = containerEl.createDiv({ cls: "status-history-tabs-content" });
@@ -43607,6 +43813,39 @@ var StatusHistorySettingTab = class extends import_obsidian12.PluginSettingTab {
         await this.plugin.save();
       })
     );
+    const aboutPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
+    aboutPane.setAttribute("data-tab", "about");
+    aboutPane.createEl("h3", { text: "Property Logs" });
+    aboutPane.createEl("p", {
+      text: "Track frontmatter changes, then explore their history in dashboards or directly inside a note.",
+      cls: "setting-item-description"
+    });
+    aboutPane.createEl("h3", { text: "Embed a dashboard" });
+    aboutPane.createEl("p", {
+      text: "Add a property-logs code block to any note. Its options apply only to that one embed; they never overwrite the saved dashboard.",
+      cls: "setting-item-description"
+    });
+    const embedExample = aboutPane.createEl("pre");
+    embedExample.createEl("code", {
+      text: "```property-logs\ndashboard: Projects\ngroupBy: property:areas\nsortBy: property:priority\nsortAscending: false\nscroll: true\nheight: 320\n```"
+    });
+    const embedOptions = [
+      ["dashboard", "Dashboard name or id; defaults to the first dashboard."],
+      ["date / period / zoom", "Choose the anchor and visible calendar span. Use auto to follow the host periodic note."],
+      ["height", "Maximum height in pixels when the embed scrolls."],
+      ["scroll", "auto preserves the normal capped embed; true uses an inner vertical scroller; false grows with its rows."],
+      ["groupBy", "status, none, folder, level, file.tags, or property:<key>."],
+      ["sortBy", "alphabetical, level, recent, or property:<key>."],
+      ["sortAscending", "true or false. Applies to note order within the shown groups."],
+      ["header / minimal", "Show the compact header, or use the smallest presentation."]
+    ];
+    embedOptions.forEach(([name, description]) => {
+      new import_obsidian12.Setting(aboutPane).setName(name).setDesc(description);
+    });
+    aboutPane.createEl("p", {
+      text: "Grouping by a property creates an outer group and foldable tracked-value rows beneath it. A note with several group values appears in each matching group; missing values appear under No value. file.tags is Obsidian metadata, while property:tags is the literal frontmatter property.",
+      cls: "setting-item-description"
+    });
     new import_obsidian12.Setting(chartPane).setName("Default tags").setDesc("Tags to filter pages by, comma-separated without # (e.g. area, project).").addText(
       (text) => text.setPlaceholder("e.g. area, project").setValue(this.plugin.settings.chartDefaults.tags).onChange(async (val) => {
         this.plugin.settings.chartDefaults.tags = val;

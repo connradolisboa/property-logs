@@ -61,6 +61,11 @@ test("accepts status as a persisted grouping mode", () => {
   assert.equal(dashboard.noteOpenGesture, "click");
 });
 
+test("accepts Obsidian file tags as a persisted grouping mode", () => {
+  const dashboard = normalizeDashboardSettings({ groupBy: "file.tags" }, "tags", "Tags");
+  assert.equal(dashboard.groupBy, "file.tags");
+});
+
 test("scope exclusions win over matching inclusions", () => {
   const dashboard = createDashboardSettings("scope");
   dashboard.scopeFilter.includedFolders = ["Projects"];

@@ -28,6 +28,8 @@ export interface TimelineSegment {
   color?: string;
   implicit: boolean;
   sourceIndex?: number;
+  /** A non-zero segment immediately preceded this one; the view may draw their transition. */
+  connectsFromPrevious?: boolean;
 }
 
 export interface HistoryParserOptions {
@@ -336,13 +338,17 @@ export function reconstructHistorySegments(
       });
     }
   } else {
+    let previousVisible = false;
     coalescedChanges.forEach((change, index) => {
       const level = resolveLevel(change.value, options, issues, change.sourceIndex);
       if (index === coalescedChanges.length - 1) {
         currentValue = change.value;
         currentLevel = level;
       }
-      if (level === 0) return;
+      if (level === 0) {
+        previousVisible = false;
+        return;
+      }
 
       segments.push({
         start: change.date,
@@ -352,7 +358,9 @@ export function reconstructHistorySegments(
         color: resolveColor(level, change.value, options, issues, change.sourceIndex),
         implicit: false,
         sourceIndex: change.sourceIndex,
+        connectsFromPrevious: previousVisible,
       });
+      previousVisible = true;
     });
   }
 

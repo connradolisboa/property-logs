@@ -1443,6 +1443,7 @@ class StatusHistorySettingTab extends PluginSettingTab {
       { id: "values", label: "Values" },
       { id: "periodic", label: "Periodic Notes" },
       { id: "chart", label: "Chart Defaults" },
+      { id: "about", label: "About" },
     ];
 
     const navEl = containerEl.createDiv({ cls: "status-history-tabs-nav" });
@@ -1721,6 +1722,41 @@ class StatusHistorySettingTab extends PluginSettingTab {
             await this.plugin.save();
           })
       );
+
+    // --- About tab ---
+    const aboutPane = contentEl.createDiv({ cls: "status-history-tab-pane" });
+    aboutPane.setAttribute("data-tab", "about");
+    aboutPane.createEl("h3", { text: "Property Logs" });
+    aboutPane.createEl("p", {
+      text: "Track frontmatter changes, then explore their history in dashboards or directly inside a note.",
+      cls: "setting-item-description",
+    });
+    aboutPane.createEl("h3", { text: "Embed a dashboard" });
+    aboutPane.createEl("p", {
+      text: "Add a property-logs code block to any note. Its options apply only to that one embed; they never overwrite the saved dashboard.",
+      cls: "setting-item-description",
+    });
+    const embedExample = aboutPane.createEl("pre");
+    embedExample.createEl("code", {
+      text: "```property-logs\ndashboard: Projects\ngroupBy: property:areas\nsortBy: property:priority\nsortAscending: false\nscroll: true\nheight: 320\n```",
+    });
+    const embedOptions = [
+      ["dashboard", "Dashboard name or id; defaults to the first dashboard."],
+      ["date / period / zoom", "Choose the anchor and visible calendar span. Use auto to follow the host periodic note."],
+      ["height", "Maximum height in pixels when the embed scrolls."],
+      ["scroll", "auto preserves the normal capped embed; true uses an inner vertical scroller; false grows with its rows."],
+      ["groupBy", "status, none, folder, level, file.tags, or property:<key>."],
+      ["sortBy", "alphabetical, level, recent, or property:<key>."],
+      ["sortAscending", "true or false. Applies to note order within the shown groups."],
+      ["header / minimal", "Show the compact header, or use the smallest presentation."],
+    ];
+    embedOptions.forEach(([name, description]) => {
+      new Setting(aboutPane).setName(name).setDesc(description);
+    });
+    aboutPane.createEl("p", {
+      text: "Grouping by a property creates an outer group and foldable tracked-value rows beneath it. A note with several group values appears in each matching group; missing values appear under No value. file.tags is Obsidian metadata, while property:tags is the literal frontmatter property.",
+      cls: "setting-item-description",
+    });
 
     new Setting(chartPane)
       .setName("Default tags")

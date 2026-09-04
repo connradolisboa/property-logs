@@ -1,3 +1,4 @@
+import type { DashboardGroupBy, DashboardSortBy } from "./dashboard";
 import { PeriodGranularity, isPeriodGranularity, parseDateString } from "./periodic";
 
 export interface EmbedOptions {
@@ -15,6 +16,12 @@ export interface EmbedOptions {
   header: boolean;
   /** Shrinks the whole embed (no header, tighter rows, smaller text) for a low-profile footprint. */
   minimal: boolean;
+  /** Local layout overrides; they never change the saved dashboard. */
+  groupBy: DashboardGroupBy | null;
+  sortBy: DashboardSortBy | null;
+  sortAscending: boolean | null;
+  /** `auto` preserves the embed default; true caps and scrolls; false expands to its content. */
+  scroll: boolean | null;
   errors: string[];
 }
 
@@ -56,6 +63,10 @@ export function parseEmbedOptions(source: string): EmbedOptions {
     height: null,
     header: true,
     minimal: false,
+    groupBy: null,
+    sortBy: null,
+    sortAscending: null,
+    scroll: null,
     errors: [],
   };
 
@@ -126,6 +137,39 @@ export function parseEmbedOptions(source: string): EmbedOptions {
         const minimal = parseBoolean(value);
         if (minimal === null) options.errors.push(`"${value}" is not true or false.`);
         else options.minimal = minimal;
+        break;
+      }
+      case "groupby": {
+        const normalized = value.trim();
+        if (["status", "none", "folder", "level", "file.tags"].includes(normalized)
+          || normalized.startsWith("property:")) {
+          options.groupBy = normalized as DashboardGroupBy;
+        } else {
+          options.errors.push(`\"${value}\" is not a group mode.`);
+        }
+        break;
+      }
+      case "sortby": {
+        const normalized = value.trim();
+        if (["alphabetical", "level", "recent"].includes(normalized)
+          || normalized.startsWith("property:")) {
+          options.sortBy = normalized as DashboardSortBy;
+        } else {
+          options.errors.push(`\"${value}\" is not a sort mode.`);
+        }
+        break;
+      }
+      case "sortascending": {
+        const ascending = parseBoolean(value);
+        if (ascending === null) options.errors.push(`\"${value}\" is not true or false.`);
+        else options.sortAscending = ascending;
+        break;
+      }
+      case "scroll": {
+        if (value.trim().toLowerCase() === "auto") break;
+        const scroll = parseBoolean(value);
+        if (scroll === null) options.errors.push(`\"${value}\" is not true, false, or auto.`);
+        else options.scroll = scroll;
         break;
       }
       default:

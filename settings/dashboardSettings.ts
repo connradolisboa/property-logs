@@ -539,13 +539,13 @@ function renderDashboardEditor(
 
   new Setting(container)
     .setName("Default group")
-    .setDesc("Use status, none, folder, level, or property:<key>. Status creates stacked note bars inside status rows.")
+    .setDesc("Use status, none, folder, level, file.tags, or property:<key>. A non-status group creates foldable status subgroups inside each value.")
     .addText((text) => text
-      .setPlaceholder("status or property:area")
+      .setPlaceholder("status, file.tags, or property:areas")
       .setValue(dashboard.groupBy)
       .onChange(async (value) => {
         const trimmed = value.trim();
-        dashboard.groupBy = trimmed === "status" || trimmed === "folder" || trimmed === "level" || trimmed.startsWith("property:")
+        dashboard.groupBy = trimmed === "status" || trimmed === "folder" || trimmed === "level" || trimmed === "file.tags" || trimmed.startsWith("property:")
           ? trimmed as DashboardSettings["groupBy"]
           : "none";
         await save();

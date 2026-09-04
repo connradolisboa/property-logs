@@ -153,6 +153,25 @@ test("coalesces consecutive identical tracked values into one segment", () => {
     { value: "High", start: "2026-09-01", end: "2026-09-03" },
     { value: "Mid", start: "2026-09-03", end: "2026-09-04" },
   ]);
+  assert.deepEqual(result.segments.map((segment) => segment.connectsFromPrevious), [false, true]);
+});
+
+test("a hidden level-zero value breaks a visible transition", () => {
+  const result = reconstructHistorySegments(options({
+    history: [
+      { dateSet: "2026-09-01", relevantSet: "High" },
+      { dateSet: "2026-09-02", relevantSet: "Hidden" },
+      { dateSet: "2026-09-03", relevantSet: "Mid" },
+    ],
+  }));
+
+  assert.deepEqual(result.segments.map((segment) => ({
+    value: segment.value,
+    connectsFromPrevious: segment.connectsFromPrevious,
+  })), [
+    { value: "High", connectsFromPrevious: false },
+    { value: "Mid", connectsFromPrevious: false },
+  ]);
 });
 
 test("resolves property colors, including the first mapped array value", () => {

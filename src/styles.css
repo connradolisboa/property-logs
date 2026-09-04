@@ -879,6 +879,28 @@ button.property-logs-axis-cell:focus-visible {
   z-index: 1;
 }
 
+/* Links between two visible statuses of one note. The SVG sits above the
+   calendar but below the note blocks, so it explains movement without taking
+   over clicks or obscuring the label. */
+.property-logs-transition-arrows {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.property-logs-transition-arrow {
+  fill: none;
+  stroke: var(--property-logs-segment-color, var(--text-muted));
+  stroke-width: 1.25;
+  opacity: 0.7;
+}
+
+.property-logs-transition-arrowhead {
+  fill: context-stroke;
+}
+
 /* vis-timeline slides an item to its new row over 0.4s, which reads as the
    dashboard still settling long after it has finished. Short enough to follow,
    fast enough to be over before the eye asks why. */
