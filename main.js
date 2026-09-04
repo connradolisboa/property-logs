@@ -1561,6 +1561,7 @@ function parseEmbedOptions(source) {
     windowDays: null,
     height: null,
     header: true,
+    minimal: false,
     errors: []
   };
   source.split(/\r?\n/).forEach((line) => {
@@ -1623,6 +1624,12 @@ function parseEmbedOptions(source) {
         const header = parseBoolean(value);
         if (header === null) options.errors.push(`"${value}" is not true or false.`);
         else options.header = header;
+        break;
+      }
+      case "minimal": {
+        const minimal = parseBoolean(value);
+        if (minimal === null) options.errors.push(`"${value}" is not true or false.`);
+        else options.minimal = minimal;
         break;
       }
       default:
@@ -40421,11 +40428,12 @@ function rowGroupValue(row, dashboard) {
   if (propertyKey) return displayPropertyValue(row.frontmatter[propertyKey]) || "Unset";
   return "";
 }
-function addOneDay(date2) {
+function addDays2(date2, days) {
   const next = new Date(date2);
-  next.setDate(next.getDate() + 1);
+  next.setDate(next.getDate() + days);
   return next;
 }
+var CURRENT_TODAY_OVERFLOW_DAYS = 3;
 function centerOf(range) {
   return new Date((range.start.getTime() + range.end.getTime()) / 2);
 }
@@ -40489,6 +40497,7 @@ var DashboardTimeline = class {
     this.containerEl.empty();
     this.containerEl.addClass("property-logs-dashboard");
     this.containerEl.toggleClass("is-compact", this.options.compact === true);
+    this.containerEl.toggleClass("is-minimal", this.options.minimal === true);
     this.containerEl.toggleClass("is-mobile-layout", import_obsidian8.Platform.isMobile);
     const dashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
     if (!dashboard) {
@@ -40986,6 +40995,7 @@ var DashboardTimeline = class {
   }
   timelineOptions(visible, showAxis) {
     const compact = this.options.compact === true;
+    const minimal = this.options.minimal === true;
     const interactive = !(compact && import_obsidian8.Platform.isMobile);
     const options = {
       autoResize: true,
@@ -41011,12 +41021,15 @@ var DashboardTimeline = class {
       zoomable: import_obsidian8.Platform.isMobile && interactive,
       zoomMin: 1e3 * 60 * 60 * 24 * 7,
       zoomMax: 1e3 * 60 * 60 * 24 * 365 * 20,
-      margin: { item: { horizontal: 0, vertical: compact ? 2 : 4 }, axis: compact ? 4 : 8 },
+      margin: {
+        item: { horizontal: 0, vertical: minimal ? 1 : compact ? 2 : 4 },
+        axis: minimal ? 2 : compact ? 4 : 8
+      },
       groupOrder: (first, second) => (first.order ?? 0) - (second.order ?? 0),
       start: visible.start,
       end: visible.end
     };
-    if (compact) options.maxHeight = this.options.maxHeight ?? 420;
+    if (compact) options.maxHeight = this.options.maxHeight ?? (minimal ? 220 : 420);
     else options.height = "100%";
     return options;
   }
@@ -41044,7 +41057,9 @@ var DashboardTimeline = class {
   }
   addSegmentItem(items, itemRows, row, dashboard, segment, segmentIndex, groupId, folded) {
     const id = `${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`;
-    const end = segment.end.getTime() <= segment.start.getTime() ? addOneDay(segment.start) : segment.end;
+    const isCurrent = segmentIndex === row.parsed.segments.length - 1;
+    const startedToday = localDate(segment.start) === localDate(/* @__PURE__ */ new Date());
+    const end = segment.end.getTime() > segment.start.getTime() ? segment.end : addDays2(segment.start, isCurrent && startedToday ? CURRENT_TODAY_OVERFLOW_DAYS : 1);
     const item = {
       id,
       group: groupId,
@@ -41360,7 +41375,8 @@ var DashboardEmbed = class extends import_obsidian9.MarkdownRenderChild {
     const timelineEl = this.containerEl.createDiv({ cls: "property-logs-embed-body" });
     this.timeline = new DashboardTimeline(this.app, this.host, timelineEl, {
       compact: true,
-      showToolbar: options.header,
+      minimal: options.minimal,
+      showToolbar: options.minimal ? false : options.header,
       maxHeight: options.height,
       windowDays: options.windowDays
     });

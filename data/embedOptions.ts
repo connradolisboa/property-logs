@@ -13,6 +13,8 @@ export interface EmbedOptions {
   height: number | null;
   /** Draws the slim header with the dashboard name and zoom controls. */
   header: boolean;
+  /** Shrinks the whole embed (no header, tighter rows, smaller text) for a low-profile footprint. */
+  minimal: boolean;
   errors: string[];
 }
 
@@ -53,6 +55,7 @@ export function parseEmbedOptions(source: string): EmbedOptions {
     windowDays: null,
     height: null,
     header: true,
+    minimal: false,
     errors: [],
   };
 
@@ -117,6 +120,12 @@ export function parseEmbedOptions(source: string): EmbedOptions {
         const header = parseBoolean(value);
         if (header === null) options.errors.push(`"${value}" is not true or false.`);
         else options.header = header;
+        break;
+      }
+      case "minimal": {
+        const minimal = parseBoolean(value);
+        if (minimal === null) options.errors.push(`"${value}" is not true or false.`);
+        else options.minimal = minimal;
         break;
       }
       default:

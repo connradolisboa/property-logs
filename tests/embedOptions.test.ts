@@ -10,6 +10,7 @@ test("an empty block uses the note's own period and the first dashboard", () => 
   assert.equal(options.period, null);
   assert.equal(options.windowDays, null);
   assert.equal(options.header, true);
+  assert.equal(options.minimal, false);
   assert.deepEqual(options.errors, []);
 });
 
@@ -49,4 +50,13 @@ test("explicit anchors override the host note", () => {
   assert.equal(options.height, 320);
   assert.equal(options.header, false);
   assert.deepEqual(options.errors, []);
+});
+
+test("minimal accepts boolean values and rejects other input", () => {
+  assert.equal(parseEmbedOptions("minimal: true").minimal, true);
+  assert.equal(parseEmbedOptions("minimal: yes").minimal, true);
+  assert.equal(parseEmbedOptions("minimal: false").minimal, false);
+  const invalid = parseEmbedOptions("minimal: sideways");
+  assert.equal(invalid.minimal, false);
+  assert.equal(invalid.errors.length, 1);
 });

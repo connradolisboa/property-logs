@@ -67,6 +67,8 @@ export interface DashboardTimelineOptions {
   showToolbar?: boolean;
   /** Compact rows, slim header, and page-friendly scrolling for embeds. */
   compact?: boolean;
+  /** Shrinks rows, text, and spacing further, for a low-profile embed. Implies compact. */
+  minimal?: boolean;
   /** Maximum pixel height, used by embeds so a long dashboard stays scrollable. */
   maxHeight?: number | null;
   /** Overrides the calendar span shown around the focused period. */
@@ -174,11 +176,19 @@ function rowGroupValue(row: TimelineRow, dashboard: DashboardSettings): string {
   return "";
 }
 
-function addOneDay(date: Date): Date {
+function addDays(date: Date, days: number): Date {
   const next = new Date(date);
-  next.setDate(next.getDate() + 1);
+  next.setDate(next.getDate() + days);
   return next;
 }
+
+/**
+ * Width, in days, given to the current status when it started today. A
+ * same-day segment otherwise collapses to zero width; widening it lets it
+ * read as an ongoing block spanning into the next few days rather than a
+ * single, easy-to-miss sliver.
+ */
+const CURRENT_TODAY_OVERFLOW_DAYS = 3;
 
 function centerOf(range: PeriodRange): Date {
   return new Date((range.start.getTime() + range.end.getTime()) / 2);
@@ -257,6 +267,7 @@ export class DashboardTimeline {
     this.containerEl.empty();
     this.containerEl.addClass("property-logs-dashboard");
     this.containerEl.toggleClass("is-compact", this.options.compact === true);
+    this.containerEl.toggleClass("is-minimal", this.options.minimal === true);
     this.containerEl.toggleClass("is-mobile-layout", Platform.isMobile);
 
     const dashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
@@ -870,6 +881,7 @@ export class DashboardTimeline {
 
   private timelineOptions(visible: PeriodRange, showAxis: boolean): TimelineOptions {
     const compact = this.options.compact === true;
+    const minimal = this.options.minimal === true;
     // An embedded timeline that pans on touch would swallow the note's own
     // scrolling, so embeds stay still on mobile and move with their buttons.
     const interactive = !(compact && Platform.isMobile);
@@ -897,12 +909,15 @@ export class DashboardTimeline {
       zoomable: Platform.isMobile && interactive,
       zoomMin: 1000 * 60 * 60 * 24 * 7,
       zoomMax: 1000 * 60 * 60 * 24 * 365 * 20,
-      margin: { item: { horizontal: 0, vertical: compact ? 2 : 4 }, axis: compact ? 4 : 8 },
+      margin: {
+        item: { horizontal: 0, vertical: minimal ? 1 : compact ? 2 : 4 },
+        axis: minimal ? 2 : compact ? 4 : 8,
+      },
       groupOrder: (first, second) => (first.order ?? 0) - (second.order ?? 0),
       start: visible.start,
       end: visible.end,
     };
-    if (compact) options.maxHeight = this.options.maxHeight ?? 420;
+    if (compact) options.maxHeight = this.options.maxHeight ?? (minimal ? 220 : 420);
     else options.height = "100%";
     return options;
   }
@@ -943,9 +958,11 @@ export class DashboardTimeline {
     folded: boolean
   ): void {
     const id = `${row.file.path}:${segment.sourceIndex ?? `implicit-${segmentIndex}`}`;
-    const end = segment.end.getTime() <= segment.start.getTime()
-      ? addOneDay(segment.start)
-      : segment.end;
+    const isCurrent = segmentIndex === row.parsed.segments.length - 1;
+    const startedToday = localDate(segment.start) === localDate(new Date());
+    const end = segment.end.getTime() > segment.start.getTime()
+      ? segment.end
+      : addDays(segment.start, isCurrent && startedToday ? CURRENT_TODAY_OVERFLOW_DAYS : 1);
     const item: TimelineItem = {
       id,
       group: groupId,

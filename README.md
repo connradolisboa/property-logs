@@ -293,6 +293,7 @@ zoom: auto
 | `zoom` | `auto` | Visible span such as `30d`, `6w`, `3m`, or `1y`. `auto` uses the span configured for the note type |
 | `height` | `420` | Maximum height in pixels |
 | `header` | `true` | Shows the slim header with the dashboard name, period, and zoom controls |
+| `minimal` | `false` | Hides the header/zoom controls and shrinks rows, text, and spacing for a low-profile embed |
 
 In a periodic note the embed centers on that note's date and zooms to match its type: a daily note shows a few weeks, a monthly note shows a couple of quarters. Spans per note type are configured in the Periodic Notes tab, and `zoom:` overrides them for a single block.
 

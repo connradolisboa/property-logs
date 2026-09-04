@@ -1833,6 +1833,31 @@ button.property-logs-axis-cell:focus-visible {
 .property-logs-dashboard.is-compact .property-logs-timeline-wrapper {
   --property-logs-axis-height: 2.25rem;
 }
+.property-logs-dashboard.is-minimal .property-logs-timeline {
+  min-height: 3rem;
+}
+.property-logs-dashboard.is-minimal .property-logs-timeline-wrapper {
+  --property-logs-axis-height: 1.5rem;
+}
+.property-logs-dashboard.is-minimal .property-logs-row-label {
+  max-width: 6rem;
+}
+.property-logs-dashboard.is-minimal .vis-labelset .vis-label .vis-inner {
+  padding: var(--size-4-1, 4px) var(--size-4-2, 8px);
+}
+.property-logs-dashboard.is-minimal .property-logs-segment-button,
+.property-logs-dashboard.is-minimal .property-logs-row-title {
+  min-height: 1.1rem;
+  padding: 0 var(--size-4-1, 4px);
+  font-size: var(--font-ui-smaller);
+}
+.property-logs-dashboard.is-minimal .property-logs-segment-meta,
+.property-logs-dashboard.is-minimal .property-logs-row-metadata {
+  display: none;
+}
+.property-logs-dashboard.is-minimal .vis-time-axis .vis-text {
+  font-size: 0.65rem;
+}
 .property-logs-marker-preview {
   display: inline-flex;
   align-items: center;

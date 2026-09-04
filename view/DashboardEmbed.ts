@@ -101,7 +101,8 @@ export class DashboardEmbed extends MarkdownRenderChild {
     const timelineEl = this.containerEl.createDiv({ cls: "property-logs-embed-body" });
     this.timeline = new DashboardTimeline(this.app, this.host, timelineEl, {
       compact: true,
-      showToolbar: options.header,
+      minimal: options.minimal,
+      showToolbar: options.minimal ? false : options.header,
       maxHeight: options.height,
       windowDays: options.windowDays,
     });
