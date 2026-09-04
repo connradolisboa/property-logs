@@ -458,7 +458,19 @@ export class DashboardTimeline {
 
   /** Applies block-local presentation choices without ever mutating saved settings. */
   private resolveDashboard(dashboard: DashboardSettings): DashboardSettings {
-    return { ...dashboard, ...this.options.dashboardOverrides };
+    const overrides = this.options.dashboardOverrides;
+    // The full dashboard must keep the persisted object itself: its toolbar
+    // writes directly to that object before saving. Only embeds with a real
+    // local override receive a presentation copy.
+    if (!overrides || (overrides.groupBy === undefined
+      && overrides.sortBy === undefined
+      && overrides.sortAscending === undefined)) return dashboard;
+    return {
+      ...dashboard,
+      ...(overrides.groupBy === undefined ? {} : { groupBy: overrides.groupBy }),
+      ...(overrides.sortBy === undefined ? {} : { sortBy: overrides.sortBy }),
+      ...(overrides.sortAscending === undefined ? {} : { sortAscending: overrides.sortAscending }),
+    };
   }
 
   /** Tears the dashboard down and builds it again, skeleton and all. */

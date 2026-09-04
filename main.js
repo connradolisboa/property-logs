@@ -40817,7 +40817,14 @@ var DashboardTimeline = class {
   }
   /** Applies block-local presentation choices without ever mutating saved settings. */
   resolveDashboard(dashboard) {
-    return { ...dashboard, ...this.options.dashboardOverrides };
+    const overrides = this.options.dashboardOverrides;
+    if (!overrides || overrides.groupBy === void 0 && overrides.sortBy === void 0 && overrides.sortAscending === void 0) return dashboard;
+    return {
+      ...dashboard,
+      ...overrides.groupBy === void 0 ? {} : { groupBy: overrides.groupBy },
+      ...overrides.sortBy === void 0 ? {} : { sortBy: overrides.sortBy },
+      ...overrides.sortAscending === void 0 ? {} : { sortAscending: overrides.sortAscending }
+    };
   }
   /** Tears the dashboard down and builds it again, skeleton and all. */
   async renderFull(token, dashboard) {
