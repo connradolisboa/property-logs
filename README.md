@@ -104,7 +104,7 @@ Alternatively, install via [BRAT](https://github.com/TfTHacker/obsidian42-brat) 
 
 ### Settings Overview
 
-Open **Settings → Property Logs** to configure six tabs: Filters, Behavior, Daily Note Log, Dashboards, Values, and Periodic Notes.
+Open **Settings → Property Logs** to configure Filters, Behavior, Daily Note Log, Dashboards, Values, Periodic Notes, Chart Defaults, and About.
 
 #### Filters Tab
 
@@ -143,6 +143,7 @@ Customize the frontmatter keys used in history entries:
 | **History key** | `property_history` | The frontmatter array where all history entries are stored |
 | **Date key** | `dateSet` | The field name used for the date within each history entry |
 | **Status key** | `statusSet` | The field name used for the status value within each history entry |
+| **Dashboard start date property** | blank | Optional vault-wide frontmatter date used as the beginning of a note's current value when that tracked property has no history; blank, invalid, or future values use the file creation date |
 
 Change these if your vault uses different naming conventions (e.g., use `timestamp` instead of `dateSet`).
 
@@ -217,6 +218,7 @@ Create one or more saved timeline dashboards. Each dashboard has independent con
 | Setting | Description |
 |---------|-------------|
 | **Tracked property** | Live frontmatter property that determines the displayed level. Its configured history key is used when available; otherwise Property Logs uses `{property}Set`. |
+| **Start date property** | Optional dashboard-specific frontmatter date for a current value with no history. It overrides the global Dashboard start date property; blank, invalid, or future values fall back to the file creation date. |
 | **Value mapping** | Maps known property values to levels 0–4. Level 0 always hides that portion of the timeline. |
 | **Unset and unmapped levels** | Controls notes without tracked history and free-text values that are not in the map. |
 | **Color mode** | Colors bars by level or by another frontmatter property. |
@@ -355,6 +357,10 @@ Every outer group and status subgroup carries a fold toggle. Folding replaces th
 A folded row draws one thin line per note range and puts overlapping ranges on separate lanes. Lanes are reused once a range ends, so a folded row grows only with the number of simultaneous notes. The line itself stays text-free; hover it to see the note name, value, and dates, and click it using the dashboard's normal open/edit gesture.
 
 The shared journal lane follows the same compact-line treatment when folded.
+
+### Notes without property history
+
+When a note has a current tracked value but no entry for that property in its history array—for example, a newly created note with `status: Active`—the dashboard still draws that value. Its segment begins at the dashboard's **Start date property**, then the global **Dashboard start date property**, and finally the file creation date. Date properties use `YYYY-MM-DD`; blank, invalid, or future dates safely fall back to the creation date. Existing property history remains authoritative.
 
 ## Global value styles
 

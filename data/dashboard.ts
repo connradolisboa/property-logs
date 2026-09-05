@@ -28,6 +28,8 @@ export interface DashboardSettings {
   id: string;
   name: string;
   trackedPropertyKey: string;
+  /** Optional per-dashboard override for the first date of history-less notes. */
+  startDateProperty: string;
   levelMapping: Record<string, TimelineLevel>;
   defaultLevelForUnset: TimelineLevel;
   unmappedValueLevel: TimelineLevel;
@@ -117,6 +119,7 @@ export function createDashboardSettings(id: string, name = "Dashboard"): Dashboa
     id,
     name,
     trackedPropertyKey: "status",
+    startDateProperty: "",
     levelMapping: {},
     defaultLevelForUnset: 0,
     unmappedValueLevel: 0,
@@ -192,6 +195,9 @@ export function normalizeDashboardSettings(
     trackedPropertyKey: typeof value.trackedPropertyKey === "string"
       ? value.trackedPropertyKey
       : defaults.trackedPropertyKey,
+    startDateProperty: typeof value.startDateProperty === "string"
+      ? value.startDateProperty.trim()
+      : defaults.startDateProperty,
     levelMapping: levelMap(value.levelMapping),
     defaultLevelForUnset: level(value.defaultLevelForUnset, defaults.defaultLevelForUnset),
     unmappedValueLevel: level(value.unmappedValueLevel, defaults.unmappedValueLevel),

@@ -101,6 +101,45 @@ test("uses one implicit segment when no tracked-key history exists", () => {
   }]);
 });
 
+test("uses the current value and configured start date when tracked history is absent", () => {
+  const result = reconstructHistorySegments(options({
+    history: [{ dateSet: "2026-09-01", commentSet: "New note" }],
+    noHistoryStartDate: "2026-08-18",
+    currentValue: "High",
+  }));
+
+  assert.equal(result.hasTrackedHistory, false);
+  assert.equal(result.currentValue, "High");
+  assert.equal(result.currentLevel, 4);
+  assert.deepEqual(result.segments.map((segment) => ({
+    start: dateOnly(segment.start),
+    end: dateOnly(segment.end),
+    value: segment.value,
+    level: segment.level,
+    implicit: segment.implicit,
+  })), [{
+    start: "2026-08-18",
+    end: "2026-09-04",
+    value: "High",
+    level: 4,
+    implicit: true,
+  }]);
+});
+
+test("falls back to the creation date for invalid or future history-less start dates", () => {
+  const invalid = reconstructHistorySegments(options({
+    noHistoryStartDate: "not-a-date",
+    currentValue: "High",
+  }));
+  const future = reconstructHistorySegments(options({
+    noHistoryStartDate: "2026-10-01",
+    currentValue: "High",
+  }));
+
+  assert.equal(dateOnly(invalid.segments[0].start), "2026-08-01");
+  assert.equal(dateOnly(future.segments[0].start), "2026-08-01");
+});
+
 test("hides implicit and explicit level-zero segments", () => {
   const implicit = reconstructHistorySegments(options({ defaultLevelForUnset: 0 }));
   assert.deepEqual(implicit.segments, []);

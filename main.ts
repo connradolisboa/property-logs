@@ -64,6 +64,8 @@ interface PluginSettings {
   historyKey: string;
   dateKey: string;
   statusKey: string;
+  /** Default frontmatter date used to begin timeline rows without property history. */
+  dashboardStartDateProperty: string;
   additionalProperties: { frontmatterKey: string; historyKey: string }[];
   chartDefaults: {
     folder: string;
@@ -107,6 +109,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   historyKey: "property_history",
   dateKey: "dateSet",
   statusKey: "statusSet",
+  dashboardStartDateProperty: "",
   additionalProperties: [],
   chartDefaults: {
     folder: "",
@@ -308,6 +311,10 @@ export default class PropertyLogsPlugin extends Plugin {
 
   getDashboardDateKey(): string {
     return this.settings.dateKey;
+  }
+
+  getDashboardStartDateProperty(): string {
+    return this.settings.dashboardStartDateProperty;
   }
 
   getDashboardFiles(dashboard: DashboardSettings): TFile[] {
@@ -1601,6 +1608,20 @@ class StatusHistorySettingTab extends PluginSettingTab {
           })
       );
 
+    new Setting(behaviorPane)
+      .setName("Dashboard start date property")
+      .setDesc("For notes without history for a tracked property, begin its current value at this frontmatter date. A dashboard can override it; blank or invalid dates use the file creation date.")
+      .addText((text) =>
+        text
+          .setPlaceholder("e.g. created")
+          .setValue(this.plugin.settings.dashboardStartDateProperty)
+          .onChange(async (val) => {
+            this.plugin.settings.dashboardStartDateProperty = val.trim();
+            await this.plugin.save();
+            this.plugin.refreshDashboardViews();
+          })
+      );
+
     behaviorPane.createEl("h3", { text: "Additional Tracked Properties" });
     behaviorPane.createEl("p", {
       text: "Track changes to other frontmatter properties. Only changed properties are logged in each history entry. 'Frontmatter key' is the property name in the note; 'History key' is the key written in the history entry.",
@@ -1755,6 +1776,11 @@ class StatusHistorySettingTab extends PluginSettingTab {
     });
     aboutPane.createEl("p", {
       text: "Grouping by a property creates an outer group and foldable tracked-value rows beneath it. A note with several group values appears in each matching group; missing values appear under No value. file.tags is Obsidian metadata, while property:tags is the literal frontmatter property.",
+      cls: "setting-item-description",
+    });
+    aboutPane.createEl("h3", { text: "History-less notes" });
+    aboutPane.createEl("p", {
+      text: "A note whose current tracked property has no history yet still appears as its current value. It starts at the dashboard start-date property, then the global Dashboard start date property, then the file creation date. Blank, invalid, or future property dates fall back to the creation date.",
       cls: "setting-item-description",
     });
 

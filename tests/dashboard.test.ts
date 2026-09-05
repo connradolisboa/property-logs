@@ -125,12 +125,14 @@ test("duplicating a dashboard copies its settings without aliasing them", () => 
   source.levelMapping.Active = 3;
   source.valueColors.Active = "palette:green";
   source.foldedGroups.push("status:Active");
+  source.startDateProperty = "started";
 
   const copy = duplicateDashboardSettings(source, "copy", "Topics copy");
   assert.equal(copy.id, "copy");
   assert.equal(copy.name, "Topics copy");
   assert.deepEqual(copy.levelMapping, { Active: 3 });
   assert.deepEqual(copy.foldedGroups, ["status:Active"]);
+  assert.equal(copy.startDateProperty, "started");
 
   copy.scopeFilter.includedFolders.push("Archive");
   copy.valueColors.Active = "palette:red";
@@ -146,6 +148,7 @@ test("new dashboard fields survive a round trip through persisted data", () => {
     foldedGroups: ["bucket:Projects", 7],
     showPeriodAxis: false,
     showJournalNotes: "yes",
+    startDateProperty: "started",
   }, "fallback", "Fallback");
 
   assert.equal(dashboard.colorMode, "value");
@@ -154,4 +157,5 @@ test("new dashboard fields survive a round trip through persisted data", () => {
   assert.deepEqual(dashboard.foldedGroups, ["bucket:Projects"]);
   assert.equal(dashboard.showPeriodAxis, false);
   assert.equal(dashboard.showJournalNotes, true);
+  assert.equal(dashboard.startDateProperty, "started");
 });

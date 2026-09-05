@@ -354,6 +354,17 @@ function renderDashboardEditor(
         await host.loadAllStatuses();
       }));
 
+  new Setting(container)
+    .setName("Start date property")
+    .setDesc("For this tracked property when it has no history yet, begin the current value at this frontmatter date. Leave blank to use the global Dashboard start date property, then the file creation date.")
+    .addText((text) => text
+      .setPlaceholder("Use global setting")
+      .setValue(dashboard.startDateProperty)
+      .onChange(async (value) => {
+        dashboard.startDateProperty = value.trim();
+        await save();
+      }));
+
   const mappingList = container.createDiv({ cls: "property-logs-map-list" });
   const drawMappings = () => {
     mappingList.empty();

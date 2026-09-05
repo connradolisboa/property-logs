@@ -50,6 +50,7 @@ export interface DashboardHost extends TopicHost {
   resolveHistoryKey(frontmatterKey: string): string;
   getDashboardHistoryKey(): string;
   getDashboardDateKey(): string;
+  getDashboardStartDateProperty(): string;
   getGlobalValueStyles(): GlobalValueStyles;
   getJournalMarkers(): JournalMarkerStyle[];
   getPeriodicNotes(): PeriodicNotes;
@@ -102,9 +103,14 @@ interface TimelineRow {
  * unchanged blocks keep the DOM they already have, which is what makes an
  * edit somewhere in the vault cost a few elements rather than all of them.
  */
+interface TimelineItemProperties extends Omit<TimelineItem, "content"> {
+  /** Supported by vis-timeline at runtime, but absent from its bundled type. */
+  subgroupOrder?: number;
+}
+
 interface PlanItem {
   id: string;
-  props: Omit<TimelineItem, "content">;
+  props: TimelineItemProperties;
   contentKey: string;
   createContent: () => HTMLElement;
 }
@@ -581,9 +587,11 @@ export class DashboardTimeline {
     const globalStyles = this.host.getGlobalValueStyles();
     const globalLevels = globalLevelMapping(globalStyles);
     const valueColors = resolveValueColors(globalStyles, dashboard.valueColors);
+    const startDateProperty = dashboard.startDateProperty || this.host.getDashboardStartDateProperty();
     const parseKey = JSON.stringify({
       trackedHistoryKey,
       dateKey,
+      startDateProperty,
       historyKey,
       day: localDate(today),
       levelMapping: dashboard.levelMapping,
@@ -611,6 +619,8 @@ export class DashboardTimeline {
           trackedHistoryKey,
           dateKey,
           creationDate: file.stat.ctime,
+          noHistoryStartDate: startDateProperty ? metadata[startDateProperty] : undefined,
+          currentValue: metadata[dashboard.trackedPropertyKey],
           today,
           levelMapping: dashboard.levelMapping,
           globalLevelMapping: globalLevels,
@@ -1393,7 +1403,7 @@ export class DashboardTimeline {
     const itemUpdates: Partial<TimelineItem>[] = [];
     const nextItems = new Map<string, AppliedEntry>();
     model.items.forEach((item) => {
-      const propsKey = planSignature(item.props as Record<string, unknown>);
+      const propsKey = planSignature(item.props as unknown as Record<string, unknown>);
       const applied = this.appliedItems.get(item.id);
       if (!applied) {
         itemAdds.push({ ...item.props, content: item.createContent() } as TimelineItem);

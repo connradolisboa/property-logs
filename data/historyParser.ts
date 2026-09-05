@@ -39,6 +39,13 @@ export interface HistoryParserOptions {
   trackedHistoryKey: string;
   dateKey: string;
   creationDate: Date | number | string;
+  /**
+   * Optional dashboard-selected beginning for a note without this property's
+   * history. Invalid or future values deliberately fall back to creationDate.
+   */
+  noHistoryStartDate?: unknown;
+  /** The current live frontmatter value, used only without tracked history. */
+  currentValue?: unknown;
   today: Date | number | string;
   levelMapping: Record<string, number>;
   /** Vault-wide level defaults, used when the dashboard has no mapping for a value. */
@@ -79,7 +86,7 @@ function hasOwn(record: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(record, key);
 }
 
-function parseDate(value: Date | number | string): Date | null {
+function parseDate(value: unknown): Date | null {
   if (value instanceof Date) {
     if (!Number.isFinite(value.getTime())) return null;
     return new Date(value.getFullYear(), value.getMonth(), value.getDate());
@@ -90,6 +97,8 @@ function parseDate(value: Date | number | string): Date | null {
     if (!Number.isFinite(date.getTime())) return null;
     return new Date(date.getFullYear(), date.getMonth(), date.getDate());
   }
+
+  if (typeof value !== "string") return null;
 
   const match = DATE_ONLY_PATTERN.exec(value);
   if (!match) return null;
@@ -233,6 +242,10 @@ export function reconstructHistorySegments(
   if (!creationDate) {
     throw new Error("History parser requires a valid note creation date.");
   }
+  const configuredStartDate = parseDate(options.noHistoryStartDate);
+  const noHistoryStartDate = configuredStartDate && configuredStartDate.getTime() <= today.getTime()
+    ? configuredStartDate
+    : creationDate;
   if (!options.trackedHistoryKey.trim()) {
     throw new Error("History parser requires a tracked history key.");
   }
@@ -326,14 +339,18 @@ export function reconstructHistorySegments(
   let currentValue: string | null = null;
   let currentLevel = options.defaultLevelForUnset;
   if (!hasTrackedHistory) {
-    const level = options.defaultLevelForUnset;
+    currentValue = normalizeScalar(options.currentValue);
+    const level = currentValue === null
+      ? options.defaultLevelForUnset
+      : resolveLevel(currentValue, options, issues);
+    currentLevel = level;
     if (level !== 0) {
       segments.push({
-        start: creationDate,
+        start: noHistoryStartDate,
         end: today,
-        value: null,
+        value: currentValue,
         level,
-        color: resolveColor(level, null, options, issues),
+        color: resolveColor(level, currentValue, options, issues),
         implicit: true,
       });
     }

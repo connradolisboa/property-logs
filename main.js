@@ -128,6 +128,7 @@ function createDashboardSettings(id, name = "Dashboard") {
     id,
     name,
     trackedPropertyKey: "status",
+    startDateProperty: "",
     levelMapping: {},
     defaultLevelForUnset: 0,
     unmappedValueLevel: 0,
@@ -174,6 +175,7 @@ function normalizeDashboardSettings(raw, fallbackId, fallbackName) {
     id: typeof value.id === "string" && value.id ? value.id : defaults2.id,
     name: typeof value.name === "string" && value.name ? value.name : defaults2.name,
     trackedPropertyKey: typeof value.trackedPropertyKey === "string" ? value.trackedPropertyKey : defaults2.trackedPropertyKey,
+    startDateProperty: typeof value.startDateProperty === "string" ? value.startDateProperty.trim() : defaults2.startDateProperty,
     levelMapping: levelMap(value.levelMapping),
     defaultLevelForUnset: level(value.defaultLevelForUnset, defaults2.defaultLevelForUnset),
     unmappedValueLevel: level(value.unmappedValueLevel, defaults2.unmappedValueLevel),
@@ -1327,6 +1329,10 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
     dashboard.trackedPropertyKey = value.trim();
     await save();
     await host.loadAllStatuses();
+  }));
+  new import_obsidian4.Setting(container).setName("Start date property").setDesc("For this tracked property when it has no history yet, begin the current value at this frontmatter date. Leave blank to use the global Dashboard start date property, then the file creation date.").addText((text) => text.setPlaceholder("Use global setting").setValue(dashboard.startDateProperty).onChange(async (value) => {
+    dashboard.startDateProperty = value.trim();
+    await save();
   }));
   const mappingList = container.createDiv({ cls: "property-logs-map-list" });
   const drawMappings = () => {
@@ -40064,6 +40070,7 @@ function parseDate(value) {
     if (!Number.isFinite(date3.getTime())) return null;
     return new Date(date3.getFullYear(), date3.getMonth(), date3.getDate());
   }
+  if (typeof value !== "string") return null;
   const match = DATE_ONLY_PATTERN.exec(value);
   if (!match) return null;
   const year = Number(match[1]);
@@ -40147,6 +40154,8 @@ function reconstructHistorySegments(options) {
   if (!creationDate) {
     throw new Error("History parser requires a valid note creation date.");
   }
+  const configuredStartDate = parseDate(options.noHistoryStartDate);
+  const noHistoryStartDate = configuredStartDate && configuredStartDate.getTime() <= today.getTime() ? configuredStartDate : creationDate;
   if (!options.trackedHistoryKey.trim()) {
     throw new Error("History parser requires a tracked history key.");
   }
@@ -40228,14 +40237,16 @@ function reconstructHistorySegments(options) {
   let currentValue = null;
   let currentLevel = options.defaultLevelForUnset;
   if (!hasTrackedHistory) {
-    const level2 = options.defaultLevelForUnset;
+    currentValue = normalizeScalar(options.currentValue);
+    const level2 = currentValue === null ? options.defaultLevelForUnset : resolveLevel(currentValue, options, issues);
+    currentLevel = level2;
     if (level2 !== 0) {
       segments.push({
-        start: creationDate,
+        start: noHistoryStartDate,
         end: today,
-        value: null,
+        value: currentValue,
         level: level2,
-        color: resolveColor(level2, null, options, issues),
+        color: resolveColor(level2, currentValue, options, issues),
         implicit: true
       });
     }
@@ -40926,9 +40937,11 @@ var DashboardTimeline = class {
     const globalStyles = this.host.getGlobalValueStyles();
     const globalLevels = globalLevelMapping(globalStyles);
     const valueColors = resolveValueColors(globalStyles, dashboard.valueColors);
+    const startDateProperty = dashboard.startDateProperty || this.host.getDashboardStartDateProperty();
     const parseKey = JSON.stringify({
       trackedHistoryKey,
       dateKey,
+      startDateProperty,
       historyKey,
       day: localDate(today),
       levelMapping: dashboard.levelMapping,
@@ -40953,6 +40966,8 @@ var DashboardTimeline = class {
           trackedHistoryKey,
           dateKey,
           creationDate: file.stat.ctime,
+          noHistoryStartDate: startDateProperty ? metadata[startDateProperty] : void 0,
+          currentValue: metadata[dashboard.trackedPropertyKey],
           today,
           levelMapping: dashboard.levelMapping,
           globalLevelMapping: globalLevels,
@@ -42547,6 +42562,7 @@ var DEFAULT_SETTINGS = {
   historyKey: "property_history",
   dateKey: "dateSet",
   statusKey: "statusSet",
+  dashboardStartDateProperty: "",
   additionalProperties: [],
   chartDefaults: {
     folder: "",
@@ -42727,6 +42743,9 @@ var PropertyLogsPlugin = class extends import_obsidian12.Plugin {
   }
   getDashboardDateKey() {
     return this.settings.dateKey;
+  }
+  getDashboardStartDateProperty() {
+    return this.settings.dashboardStartDateProperty;
   }
   getDashboardFiles(dashboard) {
     const scopeKey = JSON.stringify(dashboard.scopeFilter);
@@ -43763,6 +43782,13 @@ var StatusHistorySettingTab = class extends import_obsidian12.PluginSettingTab {
         await this.plugin.save();
       })
     );
+    new import_obsidian12.Setting(behaviorPane).setName("Dashboard start date property").setDesc("For notes without history for a tracked property, begin its current value at this frontmatter date. A dashboard can override it; blank or invalid dates use the file creation date.").addText(
+      (text) => text.setPlaceholder("e.g. created").setValue(this.plugin.settings.dashboardStartDateProperty).onChange(async (val) => {
+        this.plugin.settings.dashboardStartDateProperty = val.trim();
+        await this.plugin.save();
+        this.plugin.refreshDashboardViews();
+      })
+    );
     behaviorPane.createEl("h3", { text: "Additional Tracked Properties" });
     behaviorPane.createEl("p", {
       text: "Track changes to other frontmatter properties. Only changed properties are logged in each history entry. 'Frontmatter key' is the property name in the note; 'History key' is the key written in the history entry.",
@@ -43880,6 +43906,11 @@ var StatusHistorySettingTab = class extends import_obsidian12.PluginSettingTab {
     });
     aboutPane.createEl("p", {
       text: "Grouping by a property creates an outer group and foldable tracked-value rows beneath it. A note with several group values appears in each matching group; missing values appear under No value. file.tags is Obsidian metadata, while property:tags is the literal frontmatter property.",
+      cls: "setting-item-description"
+    });
+    aboutPane.createEl("h3", { text: "History-less notes" });
+    aboutPane.createEl("p", {
+      text: "A note whose current tracked property has no history yet still appears as its current value. It starts at the dashboard start-date property, then the global Dashboard start date property, then the file creation date. Blank, invalid, or future property dates fall back to the creation date.",
       cls: "setting-item-description"
     });
     new import_obsidian12.Setting(chartPane).setName("Default tags").setDesc("Tags to filter pages by, comma-separated without # (e.g. area, project).").addText(
