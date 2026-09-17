@@ -563,6 +563,16 @@ function renderDashboardEditor(
       }));
 
   new Setting(container)
+    .setName("Subgroup tags by status")
+    .setDesc("Only applies when the group is file.tags. Off shows each tag as one flat group of blocks.")
+    .addToggle((toggle) => toggle
+      .setValue(dashboard.tagsSubgroupByStatus)
+      .onChange(async (value) => {
+        dashboard.tagsSubgroupByStatus = value;
+        await save();
+      }));
+
+  new Setting(container)
     .setName("Default sort")
     .setDesc("Use alphabetical, level, recent, or property:<key>.")
     .addText((text) => text

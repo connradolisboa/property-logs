@@ -42,6 +42,8 @@ export interface DashboardSettings {
   scopeFilter: DashboardScopeFilter;
   rowProperties: string[];
   groupBy: DashboardGroupBy;
+  /** Only affects `groupBy: "file.tags"`; other groups always subgroup by status. */
+  tagsSubgroupByStatus: boolean;
   sortBy: DashboardSortBy;
   sortAscending: boolean;
   noteOpenGesture: NoteOpenGesture;
@@ -138,6 +140,7 @@ export function createDashboardSettings(id: string, name = "Dashboard"): Dashboa
     },
     rowProperties: [],
     groupBy: "status",
+    tagsSubgroupByStatus: true,
     sortBy: "alphabetical",
     sortAscending: true,
     noteOpenGesture: "ctrl-click",
@@ -236,6 +239,9 @@ export function normalizeDashboardSettings(
     },
     rowProperties: strings(value.rowProperties),
     groupBy,
+    tagsSubgroupByStatus: typeof value.tagsSubgroupByStatus === "boolean"
+      ? value.tagsSubgroupByStatus
+      : defaults.tagsSubgroupByStatus,
     sortBy,
     sortAscending: typeof value.sortAscending === "boolean" ? value.sortAscending : true,
     noteOpenGesture: value.noteOpenGesture === "click" ? "click" : "ctrl-click",

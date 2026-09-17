@@ -147,6 +147,7 @@ function createDashboardSettings(id, name = "Dashboard") {
     },
     rowProperties: [],
     groupBy: "status",
+    tagsSubgroupByStatus: true,
     sortBy: "alphabetical",
     sortAscending: true,
     noteOpenGesture: "ctrl-click",
@@ -210,6 +211,7 @@ function normalizeDashboardSettings(raw, fallbackId, fallbackName) {
     },
     rowProperties: strings(value.rowProperties),
     groupBy,
+    tagsSubgroupByStatus: typeof value.tagsSubgroupByStatus === "boolean" ? value.tagsSubgroupByStatus : defaults2.tagsSubgroupByStatus,
     sortBy,
     sortAscending: typeof value.sortAscending === "boolean" ? value.sortAscending : true,
     noteOpenGesture: value.noteOpenGesture === "click" ? "click" : "ctrl-click",
@@ -1458,6 +1460,10 @@ function renderDashboardEditor(container, dashboard, host, redrawAll) {
   new import_obsidian4.Setting(container).setName("Default group").setDesc("Use status, none, folder, level, file.tags, or property:<key>. A non-status group creates foldable status subgroups inside each value.").addText((text) => text.setPlaceholder("status, file.tags, or property:areas").setValue(dashboard.groupBy).onChange(async (value) => {
     const trimmed = value.trim();
     dashboard.groupBy = trimmed === "status" || trimmed === "folder" || trimmed === "level" || trimmed === "file.tags" || trimmed.startsWith("property:") ? trimmed : "none";
+    await save();
+  }));
+  new import_obsidian4.Setting(container).setName("Subgroup tags by status").setDesc("Only applies when the group is file.tags. Off shows each tag as one flat group of blocks.").addToggle((toggle) => toggle.setValue(dashboard.tagsSubgroupByStatus).onChange(async (value) => {
+    dashboard.tagsSubgroupByStatus = value;
     await save();
   }));
   new import_obsidian4.Setting(container).setName("Default sort").setDesc("Use alphabetical, level, recent, or property:<key>.").addText((text) => text.setPlaceholder("alphabetical or property:priority").setValue(dashboard.sortBy).onChange(async (value) => {
@@ -41252,6 +41258,13 @@ var DashboardTimeline = class {
       await this.host.save();
       this.refresh();
     }));
+    if (dashboard.groupBy === "file.tags") {
+      menu.addItem((item) => item.setTitle(dashboard.tagsSubgroupByStatus ? "Group tags without status" : "Subgroup tags by status").setIcon("layers").onClick(async () => {
+        dashboard.tagsSubgroupByStatus = !dashboard.tagsSubgroupByStatus;
+        await this.host.save();
+        this.refresh();
+      }));
+    }
     menu.addItem((item) => item.setTitle("Duplicate dashboard").setIcon("copy").onClick(async () => {
       const copy = await this.host.duplicateDashboard(dashboard.id);
       if (copy) await this.host.openDashboard(copy.id);
@@ -41401,6 +41414,46 @@ var DashboardTimeline = class {
         }
         bucket.segments.forEach(({ row, segment, segmentIndex }) => {
           this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId2);
+        });
+      });
+    } else if (dashboard.groupBy === "file.tags" && !dashboard.tagsSubgroupByStatus) {
+      const buckets = /* @__PURE__ */ new Map();
+      sortedRows.forEach((row) => {
+        rowGroupValues(row, dashboard).forEach((value) => {
+          const bucket = buckets.get(value) ?? { notes: /* @__PURE__ */ new Set(), segments: [] };
+          bucket.notes.add(row.file.path);
+          row.parsed.segments.forEach((segment, segmentIndex) => {
+            bucket.segments.push({ row, segment, segmentIndex });
+          });
+          buckets.set(value, bucket);
+        });
+      });
+      Array.from(buckets.entries()).sort(([first], [second]) => compareText(first, second)).forEach(([value, bucket], order) => {
+        const bucketId = groupId("bucket", value);
+        const foldable = bucket.notes.size > 1;
+        const folded = foldable && this.isFolded(dashboard, bucketId);
+        model.groupLabelText.set(bucketId, value);
+        model.groups.push({
+          id: bucketId,
+          props: {
+            id: bucketId,
+            className: folded ? "property-logs-status-group is-folded" : "property-logs-status-group",
+            order
+          },
+          contentKey: `tag|${value}|${bucket.notes.size}|${foldable}|${folded}`,
+          createContent: () => this.createGroupLabel(
+            dashboard,
+            bucketId,
+            this.createBucketLabel(value, bucket.notes.size),
+            foldable
+          )
+        });
+        if (folded) {
+          this.planFoldedSegments(model, bucketId, dashboard, bucket.segments);
+          return;
+        }
+        bucket.segments.forEach(({ row, segment, segmentIndex }) => {
+          this.planSegmentItem(model, row, dashboard, segment, segmentIndex, bucketId);
         });
       });
     } else if (dashboard.groupBy === "none") {

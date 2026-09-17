@@ -960,6 +960,16 @@ export class DashboardTimeline {
         await this.host.save();
         this.refresh();
       }));
+    if (dashboard.groupBy === "file.tags") {
+      menu.addItem((item) => item
+        .setTitle(dashboard.tagsSubgroupByStatus ? "Group tags without status" : "Subgroup tags by status")
+        .setIcon("layers")
+        .onClick(async () => {
+          dashboard.tagsSubgroupByStatus = !dashboard.tagsSubgroupByStatus;
+          await this.host.save();
+          this.refresh();
+        }));
+    }
     menu.addItem((item) => item
       .setTitle("Duplicate dashboard")
       .setIcon("copy")
@@ -1158,6 +1168,54 @@ export class DashboardTimeline {
           }
           bucket.segments.forEach(({ row, segment, segmentIndex }) => {
             this.planSegmentItem(model, row, dashboard, segment, segmentIndex, groupId);
+          });
+        });
+    } else if (dashboard.groupBy === "file.tags" && !dashboard.tagsSubgroupByStatus) {
+      const buckets = new Map<string, {
+        notes: Set<string>;
+        segments: Array<{ row: TimelineRow; segment: TimelineSegment; segmentIndex: number }>;
+      }>();
+      sortedRows.forEach((row) => {
+        rowGroupValues(row, dashboard).forEach((value) => {
+          const bucket = buckets.get(value) ?? { notes: new Set<string>(), segments: [] };
+          bucket.notes.add(row.file.path);
+          row.parsed.segments.forEach((segment, segmentIndex) => {
+            bucket.segments.push({ row, segment, segmentIndex });
+          });
+          buckets.set(value, bucket);
+        });
+      });
+
+      Array.from(buckets.entries())
+        .sort(([first], [second]) => compareText(first, second))
+        .forEach(([value, bucket], order) => {
+          const bucketId = groupId("bucket", value);
+          const foldable = bucket.notes.size > 1;
+          const folded = foldable && this.isFolded(dashboard, bucketId);
+          model.groupLabelText.set(bucketId, value);
+          model.groups.push({
+            id: bucketId,
+            props: {
+              id: bucketId,
+              className: folded
+                ? "property-logs-status-group is-folded"
+                : "property-logs-status-group",
+              order,
+            },
+            contentKey: `tag|${value}|${bucket.notes.size}|${foldable}|${folded}`,
+            createContent: () => this.createGroupLabel(
+              dashboard,
+              bucketId,
+              this.createBucketLabel(value, bucket.notes.size),
+              foldable
+            ),
+          });
+          if (folded) {
+            this.planFoldedSegments(model, bucketId, dashboard, bucket.segments);
+            return;
+          }
+          bucket.segments.forEach(({ row, segment, segmentIndex }) => {
+            this.planSegmentItem(model, row, dashboard, segment, segmentIndex, bucketId);
           });
         });
     } else if (dashboard.groupBy === "none") {
