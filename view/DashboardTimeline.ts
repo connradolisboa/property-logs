@@ -27,6 +27,7 @@ import {
   markerStyle,
   plainNoteText,
 } from "../data/journalMarkers";
+import { journalNoteCanOverflow } from "../data/journalPresentation";
 import {
   PeriodGranularity,
   PeriodRange,
@@ -166,6 +167,20 @@ function journalSignature(notes: JournalNote[]): string {
 }
 
 const DAY_MS = 1000 * 60 * 60 * 24;
+const MIN_TIMELINE_ZOOM_MS = DAY_MS * 7;
+const MAX_TIMELINE_ZOOM_MS = DAY_MS * 365 * 20;
+
+interface TimelinePinchEvent {
+  type?: string;
+  scale?: number;
+  center?: { x: number; y: number };
+  srcEvent?: Event;
+  preventDefault?: () => void;
+}
+
+interface TimelineGestureEvents {
+  on(event: "touch" | "pinch" | "release", callback: (event?: TimelinePinchEvent) => void): void;
+}
 
 function localDate(date: Date): string {
   const year = date.getFullYear();
@@ -314,6 +329,7 @@ export class DashboardTimeline {
   private resizeObserver: ResizeObserver | null = null;
   private renderToken = 0;
   private refreshTimer: number | null = null;
+  private journalDayTimer: number | null = null;
   private dashboardId = "";
   private focus: DashboardFocus | null = null;
   private openableGranularities = new Set<PeriodGranularity>(["day"]);
@@ -372,6 +388,8 @@ export class DashboardTimeline {
     this.journalNotesKey = null;
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
+    if (this.journalDayTimer !== null) window.clearTimeout(this.journalDayTimer);
+    this.journalDayTimer = null;
     this.destroyTimeline();
     this.containerEl.empty();
   }
@@ -399,6 +417,7 @@ export class DashboardTimeline {
     const token = ++this.renderToken;
     const savedDashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
     if (!savedDashboard) {
+      this.scheduleJournalDayRefresh(false);
       this.destroyTimeline();
       this.containerEl.empty();
       this.containerEl.addClass("property-logs-dashboard");
@@ -407,6 +426,7 @@ export class DashboardTimeline {
     }
     this.dashboardId = savedDashboard.id;
     const dashboard = this.resolveDashboard(savedDashboard);
+    this.scheduleJournalDayRefresh(dashboard.showJournalNotes);
     // A rebuild throws every block away and lays the calendar out from scratch.
     // When the change is one the drawn timeline can absorb — an edited note, a
     // new status, another colour mode — the data is updated in place instead,
@@ -1305,6 +1325,9 @@ export class DashboardTimeline {
       this.groupsData as any,
       options
     );
+    if (this.options.compact && Platform.isMobile) {
+      this.enableCompactMobilePinchZoom(this.timeline, timelineEl);
+    }
     this.timeline.on("click", (properties: TimelineEventPropertiesResult) => {
       if (properties.item === null || properties.item === undefined) return;
       const id = String(properties.item);
@@ -1463,9 +1486,14 @@ export class DashboardTimeline {
       horizontalScroll: !compact && !Platform.isMobile,
       verticalScroll: this.options.scroll !== false,
       moveable: interactive,
-      zoomable: Platform.isMobile && interactive,
-      zoomMin: 1000 * 60 * 60 * 24 * 7,
-      zoomMax: 1000 * 60 * 60 * 24 * 365 * 20,
+      // Chromium represents a trackpad pinch as a Ctrl-wheel gesture. Using
+      // the same modifier for a mouse gives both inputs one native, pointer-
+      // centred zoom path while ordinary wheel/trackpad scrolling stays intact.
+      zoomable: interactive,
+      zoomKey: Platform.isMobile ? "" : "ctrlKey",
+      zoomFriction: 8,
+      zoomMin: MIN_TIMELINE_ZOOM_MS,
+      zoomMax: MAX_TIMELINE_ZOOM_MS,
       // Rows sit tight under the axis and stacked lines sit tight on each
       // other: the folded rows are read as a list, and a list has no gaps.
       margin: {
@@ -1481,6 +1509,69 @@ export class DashboardTimeline {
     }
     else options.height = "100%";
     return options;
+  }
+
+  /**
+   * vis-timeline requires `moveable` for its pinch zoom, but enabling that in
+   * a compact mobile embed also captures one-finger swipes that belong to the
+   * surrounding note. Its Hammer recognizer still reports pinch events while
+   * movement is disabled, so handle only those two-finger gestures here.
+   */
+  private enableCompactMobilePinchZoom(timeline: Timeline, timelineEl: HTMLElement): void {
+    const gestures = timeline as unknown as TimelineGestureEvents;
+    let initial: {
+      start: number;
+      duration: number;
+      scale: number;
+      anchor: number;
+      anchorRatio: number;
+    } | null = null;
+
+    gestures.on("touch", () => {
+      initial = null;
+    });
+    gestures.on("release", () => {
+      initial = null;
+    });
+    gestures.on("pinch", (event) => {
+      if (event?.type === "pinchstart") initial = null;
+      const scale = event?.scale;
+      const center = event?.center;
+      if (!scale || scale <= 0 || !center) return;
+
+      event.preventDefault?.();
+      if (event.srcEvent?.cancelable) event.srcEvent.preventDefault();
+
+      if (!initial) {
+        const visible = timeline.getWindow();
+        const start = visible.start.getTime();
+        const duration = visible.end.getTime() - start;
+        const centerPanel = timelineEl.querySelector<HTMLElement>(".vis-panel.vis-center");
+        const bounds = (centerPanel ?? timelineEl).getBoundingClientRect();
+        const anchorRatio = Math.max(0, Math.min(1,
+          (center.x - bounds.left) / Math.max(bounds.width, 1)
+        ));
+        initial = {
+          start,
+          duration,
+          scale,
+          anchor: start + duration * anchorRatio,
+          anchorRatio,
+        };
+        return;
+      }
+
+      const duration = Math.max(
+        MIN_TIMELINE_ZOOM_MS,
+        Math.min(MAX_TIMELINE_ZOOM_MS, initial.duration * initial.scale / scale)
+      );
+      const start = initial.anchor - duration * initial.anchorRatio;
+      timeline.setWindow(
+        new Date(start),
+        new Date(start + duration),
+        { animation: false }
+      );
+    });
   }
 
   private observeResize(wrapper: HTMLElement, timeline: Timeline): void {
@@ -1810,10 +1901,12 @@ export class DashboardTimeline {
     const laneId = "journal:lane";
     const laneFolded = this.isFolded(dashboard, laneId);
     const foldedLaneNotes: Array<{ note: JournalNote; style: JournalMarkerStyle }> = [];
+    const today = new Date();
     let laneCount = 0;
 
     notes.forEach((note) => {
       const style = markerStyle(markers, note.marker);
+      const canOverflow = journalNoteCanOverflow(note, this.focus, today);
       const targetGroup = this.resolveJournalGroup(note, model.noteGroupIds);
       // A folded row is one line of counts with no room for pills, so a note
       // that would land in one goes back to the shared lane instead.
@@ -1832,11 +1925,14 @@ export class DashboardTimeline {
         props: {
           id: note.id,
           group: groupId,
-          start: centerOf(note.range),
-          type: "point",
+          start: canOverflow ? centerOf(note.range) : note.range.start,
+          ...(canOverflow ? {} : { end: note.range.end }),
+          type: canOverflow ? "point" : "range",
           selectable: false,
           editable: false,
-          className: "property-logs-journal-note",
+          className: canOverflow
+            ? "property-logs-journal-note is-overflowing"
+            : "property-logs-journal-note is-contained",
           style: timelineColorStyle(style.color),
         },
         contentKey: [
@@ -1847,6 +1943,7 @@ export class DashboardTimeline {
           localDate(note.range.start),
           style.icon,
           style.label,
+          canOverflow ? "overflowing" : "contained",
         ].join("|"),
         createContent: () => this.createJournalContent(note, style),
       });
@@ -1974,6 +2071,20 @@ export class DashboardTimeline {
       this.activateJournalNote(note, event);
     });
     return content;
+  }
+
+  /** Reclassifies today's annotations immediately after the local date rolls over. */
+  private scheduleJournalDayRefresh(enabled: boolean): void {
+    if (this.journalDayTimer !== null) window.clearTimeout(this.journalDayTimer);
+    this.journalDayTimer = null;
+    if (!enabled) return;
+
+    const nextDay = new Date();
+    nextDay.setHours(24, 0, 0, 50);
+    this.journalDayTimer = window.setTimeout(() => {
+      this.journalDayTimer = null;
+      this.refresh();
+    }, Math.max(1, nextDay.getTime() - Date.now()));
   }
 
   private createFoldedJournalContent(note: JournalNote, style: JournalMarkerStyle): HTMLElement {

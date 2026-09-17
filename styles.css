@@ -1996,7 +1996,20 @@ button.property-logs-axis-cell:focus-visible {
 .property-logs-timeline .vis-item.vis-point.property-logs-journal-note .vis-dot {
   display: none;
 }
+.property-logs-timeline .vis-item.vis-range.property-logs-journal-note.is-contained,
+.property-logs-timeline .vis-item.vis-range.property-logs-journal-note.is-contained .vis-item-overflow,
+.property-logs-timeline .vis-item.vis-range.property-logs-journal-note.is-contained .vis-item-content {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.property-logs-timeline .vis-item.vis-range.property-logs-journal-note.is-contained .vis-item-content {
+  display: block;
+  width: 100%;
+  padding: 0;
+}
 .property-logs-journal-button {
+  box-sizing: border-box;
   display: inline-flex;
   max-width: 14rem;
   align-items: center;
@@ -2011,6 +2024,12 @@ button.property-logs-axis-cell:focus-visible {
   font-size: 0.9em;
   line-height: 1.35;
   cursor: pointer;
+}
+.property-logs-timeline .vis-item.is-contained .property-logs-journal-button {
+  min-width: 0;
+  max-width: 100%;
+  padding-right: var(--size-4-1, 4px);
+  overflow: hidden;
 }
 .property-logs-journal-button:hover {
   background: var(--background-modifier-hover);
@@ -2030,6 +2049,7 @@ button.property-logs-axis-cell:focus-visible {
   height: var(--icon-xs);
 }
 .property-logs-journal-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2151,7 +2171,7 @@ button.property-logs-axis-cell:focus-visible {
   max-width: 8rem;
 }
 .property-logs-dashboard.is-compact .property-logs-timeline-wrapper {
-  --property-logs-axis-height: 1.9rem;
+  --property-logs-axis-height: 2.5rem;
 }
 .property-logs-dashboard.is-minimal .property-logs-floating-label {
   font-size: 0.55rem;
@@ -2160,7 +2180,7 @@ button.property-logs-axis-cell:focus-visible {
   min-height: 3rem;
 }
 .property-logs-dashboard.is-minimal .property-logs-timeline-wrapper {
-  --property-logs-axis-height: 1.75rem;
+  --property-logs-axis-height: 2.5rem;
 }
 .property-logs-dashboard.is-minimal .property-logs-axis-cell {
   font-size: 0.65rem;

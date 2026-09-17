@@ -40285,6 +40285,16 @@ function reconstructHistorySegments(options) {
   };
 }
 
+// data/journalPresentation.ts
+function sameLocalDay(first, second) {
+  return first.getFullYear() === second.getFullYear() && first.getMonth() === second.getMonth() && first.getDate() === second.getDate();
+}
+function journalNoteCanOverflow(note, focus, today = /* @__PURE__ */ new Date()) {
+  if (note.granularity !== "day") return false;
+  if (sameLocalDay(note.range.start, today)) return true;
+  return focus?.granularity === "day" && sameLocalDay(note.range.start, focus.range.start);
+}
+
 // modals/AddTopicModal.ts
 var import_obsidian8 = require("obsidian");
 
@@ -40609,6 +40619,8 @@ function journalSignature(notes) {
   return notes.map((note) => `${note.id}\0${note.marker}\0${note.text}`).join("");
 }
 var DAY_MS4 = 1e3 * 60 * 60 * 24;
+var MIN_TIMELINE_ZOOM_MS = DAY_MS4 * 7;
+var MAX_TIMELINE_ZOOM_MS = DAY_MS4 * 365 * 20;
 function localDate(date2) {
   const year = date2.getFullYear();
   const month = String(date2.getMonth() + 1).padStart(2, "0");
@@ -40721,6 +40733,7 @@ var DashboardTimeline = class {
     this.resizeObserver = null;
     this.renderToken = 0;
     this.refreshTimer = null;
+    this.journalDayTimer = null;
     this.dashboardId = "";
     this.focus = null;
     this.openableGranularities = /* @__PURE__ */ new Set(["day"]);
@@ -40767,6 +40780,8 @@ var DashboardTimeline = class {
     this.journalNotesKey = null;
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
+    if (this.journalDayTimer !== null) window.clearTimeout(this.journalDayTimer);
+    this.journalDayTimer = null;
     this.destroyTimeline();
     this.containerEl.empty();
   }
@@ -40792,6 +40807,7 @@ var DashboardTimeline = class {
     const token = ++this.renderToken;
     const savedDashboard = this.host.getDashboard(this.dashboardId) ?? this.host.getDashboards()[0];
     if (!savedDashboard) {
+      this.scheduleJournalDayRefresh(false);
       this.destroyTimeline();
       this.containerEl.empty();
       this.containerEl.addClass("property-logs-dashboard");
@@ -40800,6 +40816,7 @@ var DashboardTimeline = class {
     }
     this.dashboardId = savedDashboard.id;
     const dashboard = this.resolveDashboard(savedDashboard);
+    this.scheduleJournalDayRefresh(dashboard.showJournalNotes);
     if (this.canUpdateInPlace(dashboard) && this.updateInPlace(token, dashboard)) return;
     await this.renderFull(token, dashboard);
   }
@@ -41525,6 +41542,9 @@ var DashboardTimeline = class {
       this.groupsData,
       options
     );
+    if (this.options.compact && import_obsidian9.Platform.isMobile) {
+      this.enableCompactMobilePinchZoom(this.timeline, timelineEl);
+    }
     this.timeline.on("click", (properties) => {
       if (properties.item === null || properties.item === void 0) return;
       const id = String(properties.item);
@@ -41660,9 +41680,14 @@ var DashboardTimeline = class {
       horizontalScroll: !compact && !import_obsidian9.Platform.isMobile,
       verticalScroll: this.options.scroll !== false,
       moveable: interactive,
-      zoomable: import_obsidian9.Platform.isMobile && interactive,
-      zoomMin: 1e3 * 60 * 60 * 24 * 7,
-      zoomMax: 1e3 * 60 * 60 * 24 * 365 * 20,
+      // Chromium represents a trackpad pinch as a Ctrl-wheel gesture. Using
+      // the same modifier for a mouse gives both inputs one native, pointer-
+      // centred zoom path while ordinary wheel/trackpad scrolling stays intact.
+      zoomable: interactive,
+      zoomKey: import_obsidian9.Platform.isMobile ? "" : "ctrlKey",
+      zoomFriction: 8,
+      zoomMin: MIN_TIMELINE_ZOOM_MS,
+      zoomMax: MAX_TIMELINE_ZOOM_MS,
       // Rows sit tight under the axis and stacked lines sit tight on each
       // other: the folded rows are read as a list, and a list has no gaps.
       margin: {
@@ -41677,6 +41702,59 @@ var DashboardTimeline = class {
       options.maxHeight = this.options.maxHeight ?? (minimal ? 220 : 420);
     } else options.height = "100%";
     return options;
+  }
+  /**
+   * vis-timeline requires `moveable` for its pinch zoom, but enabling that in
+   * a compact mobile embed also captures one-finger swipes that belong to the
+   * surrounding note. Its Hammer recognizer still reports pinch events while
+   * movement is disabled, so handle only those two-finger gestures here.
+   */
+  enableCompactMobilePinchZoom(timeline, timelineEl) {
+    const gestures = timeline;
+    let initial = null;
+    gestures.on("touch", () => {
+      initial = null;
+    });
+    gestures.on("release", () => {
+      initial = null;
+    });
+    gestures.on("pinch", (event2) => {
+      if (event2?.type === "pinchstart") initial = null;
+      const scale = event2?.scale;
+      const center = event2?.center;
+      if (!scale || scale <= 0 || !center) return;
+      event2.preventDefault?.();
+      if (event2.srcEvent?.cancelable) event2.srcEvent.preventDefault();
+      if (!initial) {
+        const visible = timeline.getWindow();
+        const start2 = visible.start.getTime();
+        const duration2 = visible.end.getTime() - start2;
+        const centerPanel = timelineEl.querySelector(".vis-panel.vis-center");
+        const bounds = (centerPanel ?? timelineEl).getBoundingClientRect();
+        const anchorRatio = Math.max(0, Math.min(
+          1,
+          (center.x - bounds.left) / Math.max(bounds.width, 1)
+        ));
+        initial = {
+          start: start2,
+          duration: duration2,
+          scale,
+          anchor: start2 + duration2 * anchorRatio,
+          anchorRatio
+        };
+        return;
+      }
+      const duration = Math.max(
+        MIN_TIMELINE_ZOOM_MS,
+        Math.min(MAX_TIMELINE_ZOOM_MS, initial.duration * initial.scale / scale)
+      );
+      const start = initial.anchor - duration * initial.anchorRatio;
+      timeline.setWindow(
+        new Date(start),
+        new Date(start + duration),
+        { animation: false }
+      );
+    });
   }
   observeResize(wrapper, timeline) {
     if (typeof ResizeObserver === "undefined") return;
@@ -41959,9 +42037,11 @@ var DashboardTimeline = class {
     const laneId = "journal:lane";
     const laneFolded = this.isFolded(dashboard, laneId);
     const foldedLaneNotes = [];
+    const today = /* @__PURE__ */ new Date();
     let laneCount = 0;
     notes.forEach((note) => {
       const style = markerStyle(markers, note.marker);
+      const canOverflow = journalNoteCanOverflow(note, this.focus, today);
       const targetGroup = this.resolveJournalGroup(note, model.noteGroupIds);
       const groupId2 = targetGroup && !this.isFolded(dashboard, targetGroup) ? targetGroup : laneId;
       if (groupId2 === laneId) {
@@ -41976,11 +42056,12 @@ var DashboardTimeline = class {
         props: {
           id: note.id,
           group: groupId2,
-          start: centerOf(note.range),
-          type: "point",
+          start: canOverflow ? centerOf(note.range) : note.range.start,
+          ...canOverflow ? {} : { end: note.range.end },
+          type: canOverflow ? "point" : "range",
           selectable: false,
           editable: false,
-          className: "property-logs-journal-note",
+          className: canOverflow ? "property-logs-journal-note is-overflowing" : "property-logs-journal-note is-contained",
           style: timelineColorStyle(style.color)
         },
         contentKey: [
@@ -41990,7 +42071,8 @@ var DashboardTimeline = class {
           note.file.basename,
           localDate(note.range.start),
           style.icon,
-          style.label
+          style.label,
+          canOverflow ? "overflowing" : "contained"
         ].join("|"),
         createContent: () => this.createJournalContent(note, style)
       });
@@ -42098,6 +42180,18 @@ ${note.file.basename}`
       this.activateJournalNote(note, event2);
     });
     return content;
+  }
+  /** Reclassifies today's annotations immediately after the local date rolls over. */
+  scheduleJournalDayRefresh(enabled) {
+    if (this.journalDayTimer !== null) window.clearTimeout(this.journalDayTimer);
+    this.journalDayTimer = null;
+    if (!enabled) return;
+    const nextDay = /* @__PURE__ */ new Date();
+    nextDay.setHours(24, 0, 0, 50);
+    this.journalDayTimer = window.setTimeout(() => {
+      this.journalDayTimer = null;
+      this.refresh();
+    }, Math.max(1, nextDay.getTime() - Date.now()));
   }
   createFoldedJournalContent(note, style) {
     const content = document.createElement("button");
