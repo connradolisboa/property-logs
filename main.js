@@ -41146,6 +41146,7 @@ var DashboardTimeline = class {
     }
     const controls = header.createDiv({ cls: "property-logs-timeline-controls" });
     this.createLabelFoldButton(controls, dashboard);
+    this.createFoldAllButton(controls, dashboard);
     this.createIconButton(controls, "zoom-out", "Zoom out", () => {
       this.timeline?.zoomOut(0.35, this.timelineAnimation());
     });
@@ -41217,6 +41218,7 @@ var DashboardTimeline = class {
     });
     const controls = toolbar.createDiv({ cls: "property-logs-timeline-controls" });
     this.createLabelFoldButton(controls, dashboard);
+    this.createFoldAllButton(controls, dashboard);
     this.createIconButton(controls, "zoom-out", "Zoom out", () => {
       this.timeline?.zoomOut(0.35, this.timelineAnimation());
     });
@@ -41243,11 +41245,6 @@ var DashboardTimeline = class {
   }
   showOverflowMenu(event2, dashboard) {
     const menu = new import_obsidian9.Menu();
-    menu.addItem((item) => item.setTitle(dashboard.foldedGroups.length > 0 ? "Unfold all rows" : "Fold all rows").setIcon(dashboard.foldedGroups.length > 0 ? "unfold-vertical" : "fold-vertical").onClick(async () => {
-      dashboard.foldedGroups = dashboard.foldedGroups.length > 0 ? [] : this.allFoldableGroupIds();
-      await this.host.save();
-      this.refresh();
-    }));
     menu.addItem((item) => item.setTitle(dashboard.showJournalNotes ? "Hide periodic-note notes" : "Show periodic-note notes").setIcon("sticky-note").onClick(async () => {
       dashboard.showJournalNotes = !dashboard.showJournalNotes;
       await this.host.save();
@@ -41270,6 +41267,22 @@ var DashboardTimeline = class {
       if (copy) await this.host.openDashboard(copy.id);
     }));
     menu.showAtMouseEvent(event2);
+  }
+  /** Folds every group into one row at once, or unfolds them all again. */
+  createFoldAllButton(parent, dashboard, className) {
+    const folded = dashboard.foldedGroups.length > 0;
+    const button = this.createIconButton(
+      parent,
+      folded ? "unfold-vertical" : "fold-vertical",
+      folded ? "Unfold all rows" : "Fold all rows",
+      () => {
+        const current = this.host.getDashboard(this.dashboardId) ?? dashboard;
+        current.foldedGroups = current.foldedGroups.length > 0 ? [] : this.allFoldableGroupIds();
+        void this.host.save().then(() => this.refresh());
+      }
+    );
+    if (className) button.addClasses(className.split(" "));
+    return button;
   }
   allFoldableGroupIds() {
     if (!this.timeline) return [];
@@ -41574,6 +41587,7 @@ var DashboardTimeline = class {
     const wrapper = this.containerEl.createDiv({ cls: "property-logs-timeline-wrapper" });
     if (this.options.showToolbar === false) {
       this.createLabelFoldButton(wrapper, dashboard, "property-logs-labels-corner-toggle");
+      this.createFoldAllButton(wrapper, dashboard, "property-logs-labels-corner-toggle is-fold-all");
     }
     const axisEl = wrapper.createDiv({ cls: "property-logs-axis" });
     const timelineEl = wrapper.createDiv({ cls: "property-logs-timeline" });
@@ -41854,7 +41868,7 @@ var DashboardTimeline = class {
   syncSegmentLines() {
     if (!this.timelineEl) return;
     const items = this.timelineEl.querySelectorAll(
-      ".vis-foreground .vis-item.property-logs-segment"
+      ".vis-foreground .vis-item.property-logs-segment, .vis-foreground .vis-item.property-logs-folded-segment:not(.property-logs-folded-journal-line)"
     );
     if (items.length === 0) {
       this.syncTransitionArrows();
@@ -41863,7 +41877,9 @@ var DashboardTimeline = class {
     const measured = [];
     items.forEach((item) => {
       const content = item.querySelector(":scope > .vis-item-overflow > .vis-item-content");
-      const label = content?.querySelector(".property-logs-segment-button");
+      const label = content?.querySelector(
+        ".property-logs-segment-button, .property-logs-folded-segment-button"
+      );
       if (!content || !label) return;
       const width = parseFloat(item.style.width) || 0;
       const shift = /translateX\((-?[\d.]+)px\)/.exec(content.style.transform);
@@ -42008,6 +42024,7 @@ var DashboardTimeline = class {
           start: segment.start,
           end,
           type: "range",
+          align: "auto",
           selectable: false,
           editable: false,
           className: `property-logs-folded-segment${isCurrent ? " is-ongoing" : ""}`,
@@ -42228,10 +42245,7 @@ ${note.file.basename}`
     const icon = content.createSpan({ cls: "property-logs-journal-icon" });
     (0, import_obsidian9.setIcon)(icon, style.icon);
     content.createSpan({ text, cls: "property-logs-journal-text" });
-    content.addEventListener("click", (event2) => {
-      event2.stopPropagation();
-      this.activateJournalNote(note, event2);
-    });
+    this.bindDragAwareActivation(content, (event2) => this.activateJournalNote(note, event2));
     return content;
   }
   /** Reclassifies today's annotations immediately after the local date rolls over. */
@@ -42252,10 +42266,7 @@ ${note.file.basename}`
     content.className = "property-logs-folded-segment-button";
     applyTooltip(content, `${style.label} \xB7 ${localDate(note.range.start)}
 ${plainNoteText(note.text)}`);
-    content.addEventListener("click", (event2) => {
-      event2.stopPropagation();
-      this.activateJournalNote(note, event2);
-    });
+    this.bindDragAwareActivation(content, (event2) => this.activateJournalNote(note, event2));
     return content;
   }
   activateJournalNote(note, event2) {
@@ -42347,10 +42358,7 @@ ${plainNoteText(note.text)}`);
       ...meta,
       primaryAction
     ].join("\n"));
-    content.addEventListener("click", (event2) => {
-      event2.stopPropagation();
-      this.activateTimelineBlock(row, dashboard, event2);
-    });
+    this.bindDragAwareActivation(content, (event2) => this.activateTimelineBlock(row, dashboard, event2));
     content.addEventListener("contextmenu", (event2) => {
       if (!event2.ctrlKey) return;
       event2.preventDefault();
@@ -42359,11 +42367,16 @@ ${plainNoteText(note.text)}`);
     });
     return content;
   }
-  /** A folded lane stays visually quiet; its note name belongs in the hint. */
+  /**
+   * A folded lane is the note's name in the smallest readable type, with its
+   * line running on from there. The name keeps the lanes apart: one lane is
+   * reused by several notes over time, so a bare line could not say which.
+   */
   createFoldedSegmentContent(row, dashboard, segment) {
     const content = document.createElement("button");
     content.type = "button";
     content.className = "property-logs-folded-segment-button";
+    content.createSpan({ text: row.file.basename, cls: "property-logs-folded-segment-title" });
     const primaryAction = dashboard.noteOpenGesture === "click" ? "Click to open note; Ctrl-click to change value." : "Click to change value; Ctrl-click to open note.";
     const tooltip = [
       row.file.basename,
@@ -42372,10 +42385,7 @@ ${plainNoteText(note.text)}`);
     ].join("\n");
     content.setAttribute("aria-label", tooltip);
     applyTooltip(content, tooltip);
-    content.addEventListener("click", (event2) => {
-      event2.stopPropagation();
-      this.activateTimelineBlock(row, dashboard, event2);
-    });
+    this.bindDragAwareActivation(content, (event2) => this.activateTimelineBlock(row, dashboard, event2));
     content.addEventListener("contextmenu", (event2) => {
       if (!event2.ctrlKey) return;
       event2.preventDefault();
@@ -42388,6 +42398,28 @@ ${plainNoteText(note.text)}`);
     const direct = event2;
     const source = event2.srcEvent;
     return Boolean(direct.ctrlKey || source?.ctrlKey);
+  }
+  /**
+   * Timeline blocks sit directly in the pannable area, so dragging the
+   * timeline to scroll often starts and ends on the same block. A plain DOM
+   * "click" fires for that regardless of how far the pointer travelled in
+   * between, which would otherwise open or edit the note the drag merely
+   * passed over. Panning itself still works because pointerdown/move are left
+   * to bubble up to vis-timeline; only the resulting click is suppressed.
+   */
+  bindDragAwareActivation(content, onActivate) {
+    const dragThresholdPx = 6;
+    let start = null;
+    content.addEventListener("pointerdown", (event2) => {
+      start = { x: event2.clientX, y: event2.clientY };
+    });
+    content.addEventListener("click", (event2) => {
+      const moved = start ? Math.hypot(event2.clientX - start.x, event2.clientY - start.y) : 0;
+      start = null;
+      if (moved > dragThresholdPx) return;
+      event2.stopPropagation();
+      onActivate(event2);
+    });
   }
   activateTimelineBlock(row, dashboard, event2) {
     dashboard = this.host.getDashboard(this.dashboardId) ?? dashboard;

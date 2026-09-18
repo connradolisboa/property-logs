@@ -516,7 +516,7 @@ button.property-logs-palette-swatch:focus-visible {
   z-index: 1;
   display: flex;
   width: auto;
-  max-width: 10rem;
+  max-width: 26rem;
   min-height: 0;
   align-items: center;
   gap: 3px;
@@ -549,10 +549,8 @@ button.property-logs-palette-swatch:focus-visible {
   text-overflow: ellipsis;
 }
 
-/* Properties are in the markup so a hover can reveal them without the row
-   being rebuilt, but a name this small has no room to carry them unasked. */
 .property-logs-segment-meta {
-  display: none;
+  display: inline;
   overflow: hidden;
   opacity: 0.78;
   font-size: 0.9em;
@@ -571,7 +569,6 @@ button.property-logs-palette-swatch:focus-visible {
 .property-logs-segment-button:hover,
 .property-logs-segment-button:active,
 .property-logs-segment-button:focus-visible {
-  max-width: 26rem;
   padding: 0 var(--size-4-1, 4px);
   gap: var(--size-4-1, 4px);
   background: var(--background-primary);
@@ -579,11 +576,6 @@ button.property-logs-palette-swatch:focus-visible {
   color: var(--text-normal);
   font-size: 0.7rem;
   opacity: 1;
-}
-
-.property-logs-segment-button:hover .property-logs-segment-meta,
-.property-logs-segment-button:focus-visible .property-logs-segment-meta {
-  display: inline;
 }
 
 .property-logs-segment-button:focus-visible,
@@ -1042,36 +1034,93 @@ button.property-logs-axis-cell:focus-visible {
 
 /* ─── Folded rows: compact note lanes ─────────────────────────────────────── */
 
-/* Folding keeps each note's range visible. vis-timeline stacks each subgroup
-   as one compact lane, so the row grows only when ranges overlap in time. */
+/* Folding keeps each note's range visible, drawn the same way as an unfolded
+   row but smaller: the note's name in the tightest readable type, then its
+   line to the end of the range. vis-timeline stacks each subgroup as one
+   compact lane, so the row grows only when ranges overlap in time, and it
+   slides the name to the left edge of the window when the range starts off
+   screen, so a name can always be read. */
 .property-logs-timeline .vis-item.property-logs-folded-segment {
-  height: 10px;
+  height: 12px;
   border: 0;
   overflow: visible;
   background: transparent;
   box-shadow: none;
   font-size: 0;
   line-height: 0;
+  cursor: pointer;
 }
 
-/* vis gives range content its own padded, clipped box. A folded line has no
-   visible content there, so turn it into a generous transparent hit target
-   around the one-pixel line instead. */
 .property-logs-timeline .vis-item.property-logs-folded-segment .vis-item-overflow,
 .property-logs-timeline .vis-item.property-logs-folded-segment .vis-item-content {
-  width: 100%;
-  height: 10px;
   overflow: visible;
   padding: 0;
+  vertical-align: top;
 }
 
+.property-logs-folded-segment-button {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  width: auto;
+  max-width: 14rem;
+  height: 12px;
+  min-height: 0;
+  align-items: center;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.55rem;
+  font-weight: var(--font-medium, 500);
+  line-height: 1;
+  letter-spacing: -0.005em;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: none;
+}
+
+.property-logs-folded-segment-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A 12px name is a small thing to hit; the pointer target reaches a few
+   pixels above and below it without the lane itself growing. */
+.property-logs-folded-segment-button::after {
+  content: "";
+  position: absolute;
+  inset: -5px -2px;
+}
+
+/* Hovering a lane names it at once, in readable type, above its neighbours. */
+.property-logs-folded-segment-button:hover,
+.property-logs-folded-segment-button:active,
+.property-logs-folded-segment-button:focus-visible {
+  max-width: 26rem;
+  padding: 0 var(--size-4-1, 4px);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s, 0 1px 4px rgba(0, 0, 0, 0.3));
+  color: var(--text-normal);
+  font-size: 0.7rem;
+}
+
+/* The tooltip target used to be a tall invisible button over the lane. Now
+   the whole range is the hit area: the lane's own box takes the pointer. */
 .property-logs-timeline .vis-item.property-logs-folded-segment::before {
   content: "";
   position: absolute;
+  z-index: 0;
   top: 50%;
-  right: 0;
-  left: 0;
-  height: 1.5px;
+  left: var(--property-logs-line-start, 0px);
+  width: max(0px, calc(var(--property-logs-line-end, 100%) - var(--property-logs-line-start, 0px)));
+  height: 2px;
   border-radius: 1px;
   background: var(--property-logs-segment-color, var(--text-muted));
   opacity: 0.9;
@@ -1082,9 +1131,11 @@ button.property-logs-axis-cell:focus-visible {
 .property-logs-timeline .vis-item.property-logs-folded-segment::after {
   content: "";
   position: absolute;
+  z-index: 0;
   top: 50%;
-  right: -1px;
-  transform: translateY(-50%);
+  left: var(--property-logs-line-end, 100%);
+  opacity: 0.95;
+  transform: translate(-1px, -50%);
   pointer-events: none;
 }
 
@@ -1103,30 +1154,48 @@ button.property-logs-axis-cell:focus-visible {
   background: var(--property-logs-segment-color, var(--text-muted));
 }
 
+/* A hovered lane thickens its line as well as growing its name. */
+.property-logs-timeline .vis-item.property-logs-folded-segment:hover {
+  z-index: 20;
+}
+
+.property-logs-timeline .vis-item.property-logs-folded-segment:hover::before {
+  height: 3px;
+  opacity: 1;
+}
+
+/* Folded periodic-note lines carry no name: their line spans the whole range
+   and the button stays a transparent hit target over it. */
+.property-logs-timeline .vis-item.property-logs-folded-journal-line::before {
+  left: 0;
+  width: 100%;
+}
+
 .property-logs-timeline .vis-item.property-logs-folded-journal-line::after {
   display: none;
 }
 
-.property-logs-folded-segment-button {
+.property-logs-timeline .vis-item.property-logs-folded-journal-line .vis-item-overflow,
+.property-logs-timeline .vis-item.property-logs-folded-journal-line .vis-item-content {
+  width: 100%;
+}
+
+.property-logs-timeline .vis-item.property-logs-folded-journal-line .property-logs-folded-segment-button {
   position: absolute;
-  z-index: 2;
-  top: -6px;
+  top: -5px;
   right: 0;
-  bottom: -6px;
+  bottom: -5px;
   left: 0;
   display: block;
   width: 100%;
   height: auto;
-  min-height: 22px;
+  max-width: none;
   padding: 0;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-  cursor: pointer;
 }
 
-.property-logs-timeline .vis-item.property-logs-folded-segment:hover {
-  z-index: 20;
+.property-logs-timeline .vis-item.property-logs-folded-journal-line .property-logs-folded-segment-button:hover {
+  background: transparent;
+  box-shadow: none;
 }
 
 /* The label column folded away to nothing. vis-timeline measures the left
@@ -1194,6 +1263,11 @@ button.property-logs-axis-cell:focus-visible {
 .property-logs-timeline-wrapper .property-logs-labels-corner-toggle svg {
   width: 0.7rem;
   height: 0.7rem;
+}
+
+/* The fold-all toggle sits just right of the label toggle in the same corner. */
+.property-logs-timeline-wrapper .property-logs-labels-corner-toggle.is-fold-all {
+  left: calc(0.95rem + 3px);
 }
 
 /* vis-timeline's own nesting chevron and its level indent sit outside

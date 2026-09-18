@@ -1,0 +1,9 @@
+{
+  "id": "property-logs",
+  "name": "Property Logs",
+  "version": "2.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Automatically logs property changes with timestamps to property_history frontmatter.",
+  "author": "Connrado",
+  "isDesktopOnly": false
+}

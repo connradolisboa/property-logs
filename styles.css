@@ -1441,7 +1441,7 @@ button.property-logs-palette-swatch:focus-visible {
   z-index: 1;
   display: flex;
   width: auto;
-  max-width: 10rem;
+  max-width: 26rem;
   min-height: 0;
   align-items: center;
   gap: 3px;
@@ -1472,7 +1472,7 @@ button.property-logs-palette-swatch:focus-visible {
   text-overflow: ellipsis;
 }
 .property-logs-segment-meta {
-  display: none;
+  display: inline;
   overflow: hidden;
   opacity: 0.78;
   font-size: 0.9em;
@@ -1488,7 +1488,6 @@ button.property-logs-palette-swatch:focus-visible {
 .property-logs-segment-button:hover,
 .property-logs-segment-button:active,
 .property-logs-segment-button:focus-visible {
-  max-width: 26rem;
   padding: 0 var(--size-4-1, 4px);
   gap: var(--size-4-1, 4px);
   background: var(--background-primary);
@@ -1496,10 +1495,6 @@ button.property-logs-palette-swatch:focus-visible {
   color: var(--text-normal);
   font-size: 0.7rem;
   opacity: 1;
-}
-.property-logs-segment-button:hover .property-logs-segment-meta,
-.property-logs-segment-button:focus-visible .property-logs-segment-meta {
-  display: inline;
 }
 .property-logs-segment-button:focus-visible,
 .property-logs-row-title:focus-visible,
@@ -1857,28 +1852,75 @@ button.property-logs-axis-cell:focus-visible {
   z-index: 20;
 }
 .property-logs-timeline .vis-item.property-logs-folded-segment {
-  height: 10px;
+  height: 12px;
   border: 0;
   overflow: visible;
   background: transparent;
   box-shadow: none;
   font-size: 0;
   line-height: 0;
+  cursor: pointer;
 }
 .property-logs-timeline .vis-item.property-logs-folded-segment .vis-item-overflow,
 .property-logs-timeline .vis-item.property-logs-folded-segment .vis-item-content {
-  width: 100%;
-  height: 10px;
   overflow: visible;
   padding: 0;
+  vertical-align: top;
+}
+.property-logs-folded-segment-button {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  width: auto;
+  max-width: 14rem;
+  height: 12px;
+  min-height: 0;
+  align-items: center;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.55rem;
+  font-weight: var(--font-medium, 500);
+  line-height: 1;
+  letter-spacing: -0.005em;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: none;
+}
+.property-logs-folded-segment-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.property-logs-folded-segment-button::after {
+  content: "";
+  position: absolute;
+  inset: -5px -2px;
+}
+.property-logs-folded-segment-button:hover,
+.property-logs-folded-segment-button:active,
+.property-logs-folded-segment-button:focus-visible {
+  max-width: 26rem;
+  padding: 0 var(--size-4-1, 4px);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s, 0 1px 4px rgba(0, 0, 0, 0.3));
+  color: var(--text-normal);
+  font-size: 0.7rem;
 }
 .property-logs-timeline .vis-item.property-logs-folded-segment::before {
   content: "";
   position: absolute;
+  z-index: 0;
   top: 50%;
-  right: 0;
-  left: 0;
-  height: 1.5px;
+  left: var(--property-logs-line-start, 0px);
+  width: max(0px, calc(var(--property-logs-line-end, 100%) - var(--property-logs-line-start, 0px)));
+  height: 2px;
   border-radius: 1px;
   background: var(--property-logs-segment-color, var(--text-muted));
   opacity: 0.9;
@@ -1888,9 +1930,11 @@ button.property-logs-axis-cell:focus-visible {
 .property-logs-timeline .vis-item.property-logs-folded-segment::after {
   content: "";
   position: absolute;
+  z-index: 0;
   top: 50%;
-  right: -1px;
-  transform: translateY(-50%);
+  left: var(--property-logs-line-end, 100%);
+  opacity: 0.95;
+  transform: translate(-1px, -50%);
   pointer-events: none;
 }
 .property-logs-timeline .vis-item.property-logs-folded-segment.is-ongoing::after {
@@ -1906,28 +1950,39 @@ button.property-logs-axis-cell:focus-visible {
   border-radius: 1px;
   background: var(--property-logs-segment-color, var(--text-muted));
 }
+.property-logs-timeline .vis-item.property-logs-folded-segment:hover {
+  z-index: 20;
+}
+.property-logs-timeline .vis-item.property-logs-folded-segment:hover::before {
+  height: 3px;
+  opacity: 1;
+}
+.property-logs-timeline .vis-item.property-logs-folded-journal-line::before {
+  left: 0;
+  width: 100%;
+}
 .property-logs-timeline .vis-item.property-logs-folded-journal-line::after {
   display: none;
 }
-.property-logs-folded-segment-button {
+.property-logs-timeline .vis-item.property-logs-folded-journal-line .vis-item-overflow,
+.property-logs-timeline .vis-item.property-logs-folded-journal-line .vis-item-content {
+  width: 100%;
+}
+.property-logs-timeline .vis-item.property-logs-folded-journal-line .property-logs-folded-segment-button {
   position: absolute;
-  z-index: 2;
-  top: -6px;
+  top: -5px;
   right: 0;
-  bottom: -6px;
+  bottom: -5px;
   left: 0;
   display: block;
   width: 100%;
   height: auto;
-  min-height: 22px;
+  max-width: none;
   padding: 0;
-  border: 0;
+}
+.property-logs-timeline .vis-item.property-logs-folded-journal-line .property-logs-folded-segment-button:hover {
   background: transparent;
   box-shadow: none;
-  cursor: pointer;
-}
-.property-logs-timeline .vis-item.property-logs-folded-segment:hover {
-  z-index: 20;
 }
 .property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-labelset .vis-label .vis-inner {
   width: 0;
@@ -1979,6 +2034,9 @@ button.property-logs-axis-cell:focus-visible {
 .property-logs-timeline-wrapper .property-logs-labels-corner-toggle svg {
   width: 0.7rem;
   height: 0.7rem;
+}
+.property-logs-timeline-wrapper .property-logs-labels-corner-toggle.is-fold-all {
+  left: calc(0.95rem + 3px);
 }
 .property-logs-dashboard.is-labels-collapsed .property-logs-timeline .vis-label.vis-nesting-group::before {
   display: none;
