@@ -25,14 +25,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/connradolisboa/status-logger.git"
+    "url": "git+https://github.com/connradolisboa/property-logs.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/connradolisboa/status-logger/issues"
+    "url": "https://github.com/connradolisboa/property-logs/issues"
   },
-  "homepage": "https://github.com/connradolisboa/status-logger#readme"
+  "homepage": "https://github.com/connradolisboa/property-logs#readme"
 }

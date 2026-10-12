@@ -88,7 +88,7 @@ status_history:
 
 ## Installation
 
-1. Download `main.js` and `manifest.json` from the [latest release](https://github.com/connradolisboa/status-logger/releases)
+1. Download `main.js` and `manifest.json` from the [latest release](https://github.com/connradolisboa/property-logs/releases)
 2. Create a folder `.obsidian/plugins/property-logs/` in your vault
 3. Place both files in that folder
 4. Reload Obsidian or restart it
@@ -97,7 +97,7 @@ status_history:
 Alternatively, install via [BRAT](https://github.com/TfTHacker/obsidian42-brat) (Obsidian plugin manager):
 
 1. Install BRAT and enable it
-2. Add the repository: `https://github.com/connradolisboa/status-logger`
+2. Add the repository: `https://github.com/connradolisboa/property-logs`
 3. Enable **Property Logs** in Community Plugins
 
 ## Configuration
@@ -478,7 +478,7 @@ Add the tag to any note you want to monitor, regardless of folder.
 
 ## Support
 
-Found a bug or have a feature request? Open an issue on [GitHub](https://github.com/connradolisboa/status-logger/issues).
+Found a bug or have a feature request? Open an issue on [GitHub](https://github.com/connradolisboa/property-logs/issues).
 
 ## License
 
