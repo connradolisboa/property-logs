@@ -351,6 +351,37 @@ function historyContainsKey(history, key) {
   );
 }
 
+// data/trackedValues.ts
+function trackedValue(raw) {
+  if (raw === void 0 || raw === null) return void 0;
+  const value = String(raw);
+  return value === "" ? void 0 : value;
+}
+function compareTracked(current, previous, seenWithout) {
+  if (current === previous) return "unchanged";
+  return previous !== void 0 || seenWithout ? "changed" : "baseline";
+}
+function isAtOrInside(path2, base) {
+  return path2 === base || path2.startsWith(`${base}/`);
+}
+function moveTrackedPaths(map2, oldPath, newPath) {
+  if (oldPath === newPath) return false;
+  const moved = [...map2].filter(([path2]) => isAtOrInside(path2, oldPath));
+  for (const [path2] of moved) map2.delete(path2);
+  for (const [path2, value] of moved) map2.set(newPath + path2.slice(oldPath.length), value);
+  return moved.length > 0;
+}
+function forgetTrackedPaths(map2, path2) {
+  let forgot = false;
+  for (const key of [...map2.keys()]) {
+    if (isAtOrInside(key, path2)) {
+      map2.delete(key);
+      forgot = true;
+    }
+  }
+  return forgot;
+}
+
 // data/journalMarkers.ts
 var DEFAULT_JOURNAL_MARKERS = [
   { marker: "n", label: "Note", icon: "pencil", color: "palette:blue" },
@@ -42768,6 +42799,10 @@ var PropertyLogsPlugin = class extends import_obsidian12.Plugin {
     super(...arguments);
     this.previousStatuses = /* @__PURE__ */ new Map();
     this.previousPropertyValues = /* @__PURE__ */ new Map();
+    /** Per note, the tracked properties it was last seen without, so filling one in is logged. */
+    this.missingKeys = /* @__PURE__ */ new Map();
+    /** Saves tracking moved by renames and deletes once a burst (a folder move) settles. */
+    this.saveTrackingSoon = (0, import_obsidian12.debounce)(() => void this.save(), 1e3, true);
     /** Vault scans and parsed histories, shared by every dashboard on screen. */
     this.dataCache = new DashboardDataCache();
     /** The periodic configuration the resolved contexts were cached under. */
@@ -42886,6 +42921,7 @@ var PropertyLogsPlugin = class extends import_obsidian12.Plugin {
       this.refreshDashboardViews();
     }));
     this.registerEvent(this.app.vault.on("delete", (file) => {
+      this.forgetTrackedValues(file.path);
       this.journalNoteIndex.invalidate(file.path);
       this.periodicNotes.invalidate(file.path);
       this.dataCache.invalidateFile(file.path);
@@ -42893,6 +42929,7 @@ var PropertyLogsPlugin = class extends import_obsidian12.Plugin {
       this.refreshDashboardViews();
     }));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      this.moveTrackedValues(oldPath, file.path);
       this.journalNoteIndex.invalidate(oldPath);
       this.journalNoteIndex.invalidate(file.path);
       this.periodicNotes.invalidate(oldPath);
@@ -43206,7 +43243,11 @@ var PropertyLogsPlugin = class extends import_obsidian12.Plugin {
       };
     }
     if (data?.previousStatuses) {
-      this.previousStatuses = new Map(Object.entries(data.previousStatuses));
+      this.previousStatuses = /* @__PURE__ */ new Map();
+      for (const [path2, raw] of Object.entries(data.previousStatuses)) {
+        const value = trackedValue(raw);
+        if (value !== void 0) this.previousStatuses.set(path2, value);
+      }
     }
     if (data?.previousPropertyValues) {
       this.previousPropertyValues = new Map(Object.entries(data.previousPropertyValues));
@@ -43222,28 +43263,65 @@ var PropertyLogsPlugin = class extends import_obsidian12.Plugin {
   }
   async loadAllStatuses() {
     const files = this.app.vault.getMarkdownFiles();
+    const props = this.getTrackedPropertyConfigs();
     for (const file of files) {
       const cache = this.app.metadataCache.getFileCache(file);
-      const fm = cache?.frontmatter;
+      if (!cache) continue;
+      const fm = cache.frontmatter;
+      this.rememberMissingKeys(file, fm, props);
       if (!fm) continue;
-      if (fm.status) {
-        this.previousStatuses.set(file.path, String(fm.status));
+      const status = trackedValue(fm.status);
+      if (status !== void 0) {
+        this.previousStatuses.set(file.path, status);
       }
-      const props = this.getTrackedPropertyConfigs();
       if (props.length > 0) {
         const existing = this.previousPropertyValues.get(file.path) ?? {};
         let changed = false;
         for (const { frontmatterKey } of props) {
-          const val = fm[frontmatterKey];
-          if (val !== void 0 && val !== null && existing[frontmatterKey] === void 0) {
-            existing[frontmatterKey] = String(val);
+          const val = trackedValue(fm[frontmatterKey]);
+          if (val !== void 0 && existing[frontmatterKey] === void 0) {
+            existing[frontmatterKey] = val;
             changed = true;
           }
         }
         if (changed) this.previousPropertyValues.set(file.path, existing);
       }
     }
+    const paths = new Set(files.map((file) => file.path));
+    for (const path2 of [...this.previousStatuses.keys()]) {
+      if (!paths.has(path2)) this.previousStatuses.delete(path2);
+    }
+    for (const path2 of [...this.previousPropertyValues.keys()]) {
+      if (!paths.has(path2)) this.previousPropertyValues.delete(path2);
+    }
     await this.save();
+  }
+  /**
+   * Remembers which tracked properties a note is without, so filling one in
+   * later is logged. An empty note is skipped: the content it gets next (a
+   * template, a pasted draft) is its starting point, not a change.
+   */
+  rememberMissingKeys(file, frontmatter, props = this.getTrackedPropertyConfigs()) {
+    const missing = file.stat.size > 0 ? ["status", ...props.map((property) => property.frontmatterKey)].filter((key) => trackedValue(frontmatter?.[key]) === void 0) : [];
+    if (missing.length > 0) this.missingKeys.set(file.path, new Set(missing));
+    else this.missingKeys.delete(file.path);
+  }
+  /** Carries what was last seen of a note, or of a folder's notes, to the new path. */
+  moveTrackedValues(oldPath, newPath) {
+    const moved = [
+      moveTrackedPaths(this.previousStatuses, oldPath, newPath),
+      moveTrackedPaths(this.previousPropertyValues, oldPath, newPath)
+    ].some(Boolean);
+    moveTrackedPaths(this.missingKeys, oldPath, newPath);
+    if (moved) this.saveTrackingSoon();
+  }
+  forgetTrackedValues(path2) {
+    const forgot = [
+      forgetTrackedPaths(this.previousStatuses, path2),
+      forgetTrackedPaths(this.previousPropertyValues, path2)
+    ].some(Boolean);
+    forgetTrackedPaths(this.missingKeys, path2);
+    if (forgot) this.saveTrackingSoon();
   }
   isFileWatched(file) {
     const { includedFolders, includedTags, excludedFolders, excludedTags } = this.settings;
@@ -43270,34 +43348,39 @@ var PropertyLogsPlugin = class extends import_obsidian12.Plugin {
   async handleMetadataChange(file) {
     if (!this.isFileWatched(file)) return;
     const cache = this.app.metadataCache.getFileCache(file);
-    const fm = cache?.frontmatter;
-    const newStatus = fm?.status;
+    if (!cache) return;
+    const fm = cache.frontmatter;
+    const props = this.getTrackedPropertyConfigs();
+    const seenWithout = this.missingKeys.get(file.path);
+    this.rememberMissingKeys(file, fm, props);
+    const newStatus = trackedValue(fm?.status);
     const previousStatus = this.previousStatuses.get(file.path);
-    const statusChanged = newStatus !== void 0 && newStatus !== previousStatus;
+    const statusOutcome = newStatus === void 0 ? "unchanged" : compareTracked(newStatus, previousStatus, seenWithout?.has("status") ?? false);
     const prevProps = this.previousPropertyValues.get(file.path) ?? {};
     const changedProps = {};
     const realChanges = [];
     const updatedTracking = { ...prevProps };
-    for (const { frontmatterKey, historyKey } of this.getTrackedPropertyConfigs()) {
-      const newVal = fm?.[frontmatterKey];
-      if (newVal === void 0 || newVal === null) continue;
-      const strVal = String(newVal);
-      if (prevProps[frontmatterKey] !== void 0 && prevProps[frontmatterKey] !== strVal) {
-        changedProps[historyKey] = strVal;
-        updatedTracking[frontmatterKey] = strVal;
-        realChanges.push({ fmKey: frontmatterKey, histKey: historyKey, from: prevProps[frontmatterKey], to: strVal });
-      } else if (prevProps[frontmatterKey] === void 0) {
-        updatedTracking[frontmatterKey] = strVal;
+    let trackingChanged = false;
+    for (const { frontmatterKey, historyKey } of props) {
+      const newVal = trackedValue(fm?.[frontmatterKey]);
+      if (newVal === void 0) continue;
+      const outcome = compareTracked(newVal, prevProps[frontmatterKey], seenWithout?.has(frontmatterKey) ?? false);
+      if (outcome === "unchanged") continue;
+      updatedTracking[frontmatterKey] = newVal;
+      trackingChanged = true;
+      if (outcome === "changed") {
+        changedProps[historyKey] = newVal;
+        realChanges.push({ fmKey: frontmatterKey, histKey: historyKey, from: prevProps[frontmatterKey] ?? "", to: newVal });
       }
     }
-    if (!statusChanged && Object.keys(changedProps).length === 0) return;
-    if (newStatus !== void 0) this.previousStatuses.set(file.path, newStatus);
+    if (statusOutcome === "unchanged" && !trackingChanged) return;
+    if (statusOutcome !== "unchanged") this.previousStatuses.set(file.path, newStatus);
     this.previousPropertyValues.set(file.path, updatedTracking);
     await this.save();
-    const shouldLogStatus = statusChanged && previousStatus !== void 0 && !!newStatus;
-    if (!shouldLogStatus && Object.keys(changedProps).length === 0) return;
+    const shouldLogStatus = statusOutcome === "changed";
+    if (!shouldLogStatus && realChanges.length === 0) return;
     if (shouldLogStatus) {
-      realChanges.unshift({ fmKey: "status", histKey: this.settings.statusKey, from: previousStatus, to: newStatus });
+      realChanges.unshift({ fmKey: "status", histKey: this.settings.statusKey, from: previousStatus ?? "", to: newStatus });
     }
     await this.appendStatusHistory(file, shouldLogStatus ? newStatus : void 0, changedProps);
     await this.logChangesToDailyNote(file, realChanges);
@@ -43533,6 +43616,7 @@ var PropertyLogsPlugin = class extends import_obsidian12.Plugin {
     }
   }
   onunload() {
+    this.saveTrackingSoon.run();
     if (this.dashboardRefreshTimer !== null) window.clearTimeout(this.dashboardRefreshTimer);
     console.log("Property Logs Plugin unloaded");
   }

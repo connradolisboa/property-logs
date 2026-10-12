@@ -48,7 +48,7 @@ An [Obsidian](https://obsidian.md) plugin that automatically logs property chang
 
 ## How It Works
 
-The plugin monitors your vault's metadata cache. When a property in a watched note changes, it automatically appends an entry to a configurable history array in the note's frontmatter. Only changes are logged—the first time a property is seen, it becomes the baseline.
+The plugin monitors your vault's metadata cache. When a property in a watched note changes, it automatically appends an entry to a configurable history array in the note's frontmatter. Only changes are logged—the first time a note is seen, its values become the baseline. A tracked property filled in on a note that was seen without it (for example, giving a status to a note that had none) is logged as a change. What the plugin remembers about a note follows it through renames and folder moves, so the first change after a move is logged too.
 
 ### Example
 
@@ -449,7 +449,7 @@ Add the tag to any note you want to monitor, regardless of folder.
 - **Comments for context** — Use "Add comment to note" to annotate why a status changed for later review
 - **Consolidate same-day changes** — Enable "Overwrite same-day entries" if you frequently adjust properties and only care about the final state per day
 - **Chart filtering** — Always check the chart command's folder/tags to ensure you're visualizing the right subset of notes
-- **Baseline stability** — The first time a property is seen becomes the baseline (not logged). Subsequent changes are logged. This prevents spurious entries when enabling tracking on an existing note
+- **Baseline stability** — The first time a note is seen, its values become the baseline (not logged). Subsequent changes are logged, including a property filled in for the first time. A new note's initial values, and the content a template puts into an empty note, are its baseline. This prevents spurious entries when enabling tracking on an existing note
 
 ## How It Compares
 
@@ -472,7 +472,7 @@ Add the tag to any note you want to monitor, regardless of folder.
 ## Technical Details
 
 - **Non-destructive** — All frontmatter edits use Obsidian's `processFrontMatter` API
-- **Persistent state** — Baseline property values are saved to plugin data, so tracking state survives vault restarts
+- **Persistent state** — Baseline property values are saved to plugin data, so tracking state survives vault restarts. Renames and moves carry it to the new path; entries for notes deleted while the plugin was off are dropped at startup
 - **Metadata cache** — The plugin listens to metadata cache changes, so updates are instant within Obsidian
 - **No external APIs** — All logging and charting happens locally in your vault
 

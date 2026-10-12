@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TextAreaComponent, TextComponent, TFile, moment, normalizePath } from "obsidian";
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TextAreaComponent, TextComponent, TFile, debounce, moment, normalizePath } from "obsidian";
 
 import {
   DashboardFileData,
@@ -9,6 +9,7 @@ import {
 } from "./data/dashboard";
 import { DashboardDataCache } from "./data/dashboardCache";
 import { collectCompatibleHistory, historyContainsKey } from "./data/historyCompatibility";
+import { compareTracked, forgetTrackedPaths, moveTrackedPaths, trackedValue } from "./data/trackedValues";
 import {
   DEFAULT_JOURNAL_MARKERS,
   JournalMarkerStyle,
@@ -135,6 +136,10 @@ const DEFAULT_SETTINGS: PluginSettings = {
 export default class PropertyLogsPlugin extends Plugin {
   private previousStatuses: Map<string, string> = new Map();
   private previousPropertyValues: Map<string, Record<string, string>> = new Map();
+  /** Per note, the tracked properties it was last seen without, so filling one in is logged. */
+  private missingKeys: Map<string, Set<string>> = new Map();
+  /** Saves tracking moved by renames and deletes once a burst (a folder move) settles. */
+  private readonly saveTrackingSoon = debounce(() => void this.save(), 1000, true);
   private periodicNotes!: PeriodicNotes;
   private journalNoteIndex!: JournalNoteIndex;
   /** Vault scans and parsed histories, shared by every dashboard on screen. */
@@ -270,6 +275,7 @@ export default class PropertyLogsPlugin extends Plugin {
       this.refreshDashboardViews();
     }));
     this.registerEvent(this.app.vault.on("delete", (file) => {
+      this.forgetTrackedValues(file.path);
       this.journalNoteIndex.invalidate(file.path);
       this.periodicNotes.invalidate(file.path);
       this.dataCache.invalidateFile(file.path);
@@ -277,6 +283,7 @@ export default class PropertyLogsPlugin extends Plugin {
       this.refreshDashboardViews();
     }));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      this.moveTrackedValues(oldPath, file.path);
       this.journalNoteIndex.invalidate(oldPath);
       this.journalNoteIndex.invalidate(file.path);
       this.periodicNotes.invalidate(oldPath);
@@ -645,7 +652,12 @@ export default class PropertyLogsPlugin extends Plugin {
       };
     }
     if (data?.previousStatuses) {
-      this.previousStatuses = new Map(Object.entries(data.previousStatuses));
+      // Older versions saved an empty `status:` as null or "", which is no status to compare against.
+      this.previousStatuses = new Map();
+      for (const [path, raw] of Object.entries(data.previousStatuses)) {
+        const value = trackedValue(raw);
+        if (value !== undefined) this.previousStatuses.set(path, value);
+      }
     }
     if (data?.previousPropertyValues) {
       this.previousPropertyValues = new Map(Object.entries(data.previousPropertyValues));
@@ -663,28 +675,77 @@ export default class PropertyLogsPlugin extends Plugin {
 
   async loadAllStatuses() {
     const files = this.app.vault.getMarkdownFiles();
+    const props = this.getTrackedPropertyConfigs();
     for (const file of files) {
       const cache = this.app.metadataCache.getFileCache(file);
-      const fm = cache?.frontmatter;
+      if (!cache) continue;
+      const fm = cache.frontmatter;
+      this.rememberMissingKeys(file, fm, props);
       if (!fm) continue;
-      if (fm.status) {
-        this.previousStatuses.set(file.path, String(fm.status));
+      const status = trackedValue(fm.status);
+      if (status !== undefined) {
+        this.previousStatuses.set(file.path, status);
       }
-      const props = this.getTrackedPropertyConfigs();
       if (props.length > 0) {
         const existing = this.previousPropertyValues.get(file.path) ?? {};
         let changed = false;
         for (const { frontmatterKey } of props) {
-          const val = fm[frontmatterKey];
-          if (val !== undefined && val !== null && existing[frontmatterKey] === undefined) {
-            existing[frontmatterKey] = String(val);
+          const val = trackedValue(fm[frontmatterKey]);
+          if (val !== undefined && existing[frontmatterKey] === undefined) {
+            existing[frontmatterKey] = val;
             changed = true;
           }
         }
         if (changed) this.previousPropertyValues.set(file.path, existing);
       }
     }
+    // Notes deleted or renamed while Property Logs was off: a new note at one of
+    // these paths must start from its own baseline, not the old note's values.
+    const paths = new Set(files.map((file) => file.path));
+    for (const path of [...this.previousStatuses.keys()]) {
+      if (!paths.has(path)) this.previousStatuses.delete(path);
+    }
+    for (const path of [...this.previousPropertyValues.keys()]) {
+      if (!paths.has(path)) this.previousPropertyValues.delete(path);
+    }
     await this.save();
+  }
+
+  /**
+   * Remembers which tracked properties a note is without, so filling one in
+   * later is logged. An empty note is skipped: the content it gets next (a
+   * template, a pasted draft) is its starting point, not a change.
+   */
+  private rememberMissingKeys(
+    file: TFile,
+    frontmatter: Record<string, unknown> | undefined,
+    props = this.getTrackedPropertyConfigs()
+  ): void {
+    const missing = file.stat.size > 0
+      ? ["status", ...props.map((property) => property.frontmatterKey)]
+        .filter((key) => trackedValue(frontmatter?.[key]) === undefined)
+      : [];
+    if (missing.length > 0) this.missingKeys.set(file.path, new Set(missing));
+    else this.missingKeys.delete(file.path);
+  }
+
+  /** Carries what was last seen of a note, or of a folder's notes, to the new path. */
+  private moveTrackedValues(oldPath: string, newPath: string): void {
+    const moved = [
+      moveTrackedPaths(this.previousStatuses, oldPath, newPath),
+      moveTrackedPaths(this.previousPropertyValues, oldPath, newPath),
+    ].some(Boolean);
+    moveTrackedPaths(this.missingKeys, oldPath, newPath);
+    if (moved) this.saveTrackingSoon();
+  }
+
+  private forgetTrackedValues(path: string): void {
+    const forgot = [
+      forgetTrackedPaths(this.previousStatuses, path),
+      forgetTrackedPaths(this.previousPropertyValues, path),
+    ].some(Boolean);
+    forgetTrackedPaths(this.missingKeys, path);
+    if (forgot) this.saveTrackingSoon();
   }
 
   isFileWatched(file: TFile): boolean {
@@ -723,11 +784,18 @@ export default class PropertyLogsPlugin extends Plugin {
     if (!this.isFileWatched(file)) return;
 
     const cache = this.app.metadataCache.getFileCache(file);
-    const fm = cache?.frontmatter;
+    if (!cache) return;
+    const fm = cache.frontmatter;
+    const props = this.getTrackedPropertyConfigs();
+    // What the note was last seen without, read before this sight replaces it.
+    const seenWithout = this.missingKeys.get(file.path);
+    this.rememberMissingKeys(file, fm, props);
 
-    const newStatus = fm?.status as string | undefined;
+    const newStatus = trackedValue(fm?.status);
     const previousStatus = this.previousStatuses.get(file.path);
-    const statusChanged = newStatus !== undefined && newStatus !== previousStatus;
+    const statusOutcome = newStatus === undefined
+      ? "unchanged"
+      : compareTracked(newStatus, previousStatus, seenWithout?.has("status") ?? false);
 
     const prevProps = this.previousPropertyValues.get(file.path) ?? {};
     // changedProps: historyKey → new value (for writing to history entry)
@@ -736,33 +804,33 @@ export default class PropertyLogsPlugin extends Plugin {
     const realChanges: Array<{ fmKey: string; histKey: string; from: string; to: string }> = [];
     // updatedTracking: frontmatterKey → new value (for persisting previous values)
     const updatedTracking: Record<string, string> = { ...prevProps };
-    for (const { frontmatterKey, historyKey } of this.getTrackedPropertyConfigs()) {
-      const newVal = fm?.[frontmatterKey];
-      if (newVal === undefined || newVal === null) continue;
-      const strVal = String(newVal);
-      if (prevProps[frontmatterKey] !== undefined && prevProps[frontmatterKey] !== strVal) {
-        changedProps[historyKey] = strVal;
-        updatedTracking[frontmatterKey] = strVal;
-        realChanges.push({ fmKey: frontmatterKey, histKey: historyKey, from: prevProps[frontmatterKey], to: strVal });
-      } else if (prevProps[frontmatterKey] === undefined) {
-        // Establish baseline silently
-        updatedTracking[frontmatterKey] = strVal;
+    let trackingChanged = false;
+    for (const { frontmatterKey, historyKey } of props) {
+      const newVal = trackedValue(fm?.[frontmatterKey]);
+      if (newVal === undefined) continue;
+      const outcome = compareTracked(newVal, prevProps[frontmatterKey], seenWithout?.has(frontmatterKey) ?? false);
+      if (outcome === "unchanged") continue;
+      updatedTracking[frontmatterKey] = newVal;
+      trackingChanged = true;
+      if (outcome === "changed") {
+        changedProps[historyKey] = newVal;
+        realChanges.push({ fmKey: frontmatterKey, histKey: historyKey, from: prevProps[frontmatterKey] ?? "", to: newVal });
       }
     }
 
-    if (!statusChanged && Object.keys(changedProps).length === 0) return;
+    if (statusOutcome === "unchanged" && !trackingChanged) return;
 
     // Update tracking
-    if (newStatus !== undefined) this.previousStatuses.set(file.path, newStatus);
+    if (statusOutcome !== "unchanged") this.previousStatuses.set(file.path, newStatus!);
     this.previousPropertyValues.set(file.path, updatedTracking);
     await this.save();
 
-    // Don't log on first-time baseline (no previous value)
-    const shouldLogStatus = statusChanged && previousStatus !== undefined && !!newStatus;
-    if (!shouldLogStatus && Object.keys(changedProps).length === 0) return;
+    // A baseline (the first sight of a note) is remembered, not logged
+    const shouldLogStatus = statusOutcome === "changed";
+    if (!shouldLogStatus && realChanges.length === 0) return;
 
     if (shouldLogStatus) {
-      realChanges.unshift({ fmKey: "status", histKey: this.settings.statusKey, from: previousStatus!, to: newStatus! });
+      realChanges.unshift({ fmKey: "status", histKey: this.settings.statusKey, from: previousStatus ?? "", to: newStatus! });
     }
 
     await this.appendStatusHistory(file, shouldLogStatus ? newStatus! : undefined, changedProps);
@@ -1050,6 +1118,7 @@ export default class PropertyLogsPlugin extends Plugin {
   }
 
   onunload() {
+    this.saveTrackingSoon.run();
     if (this.dashboardRefreshTimer !== null) window.clearTimeout(this.dashboardRefreshTimer);
     console.log("Property Logs Plugin unloaded");
   }
